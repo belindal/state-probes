@@ -70,8 +70,8 @@ def main(data_dir, gamefile, out_file, state_model_path, state_model_arch, probe
 
     if 'pair' in probe_target:
         pair_out_file = os.path.join(data_dir, 'entity_pairs.json')
-        print(f"Computing entity pairs to {pair_out_file}")
         if not os.path.exists(pair_out_file):
+            print(f"Computing entity pairs to {pair_out_file}")
             possible_pairs, type_to_gid_to_ents = gen_possible_pairs(gamefile, tqdm(game_ids))
             possible_pairs_serialized = {}
             for gameid in possible_pairs:

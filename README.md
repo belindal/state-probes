@@ -48,15 +48,19 @@ tar -xzvf tw_data.tar.gz
 ## LM Training
 To train a BART or T5 model on Alchemy data
 ```bash
-python scripts/train_alchemy.py --arch [t5|bart] [--synthetic] --encode_init_state NL [--no_pretrain]
+python scripts/train_alchemy.py \
+    --arch [t5|bart] [--no_pretrain] \
+    [--synthetic] --encode_init_state NL
 ```
-Saves under `sconeModels/*`
+Saves model checkpoints under `sconeModels/*`.
 
 To train a BART or T5 model on Textworld data
 ```bash
-python scripts/train_textworld.py --arch [t5/bart] --data tw_data/simple_traces --gamefile tw_games/simple_games [--no_pretrain]
+python scripts/train_textworld.py \
+    --arch [t5/bart] [--no_pretrain] \
+    --data tw_data/simple_traces --gamefile tw_games/simple_games
 ```
-Saves under `twModels/*`
+Saves model checkpoints nder `twModels/*`.
 
 
 ## Probe Training & Evaluation
@@ -73,13 +77,15 @@ python scripts/probe_alchemy.py \
 ```
 For evaluation, add `--eval_only --probe_save_path <path_to_probe_checkpoint>`.
 
-Add `--control_input` for No LM experiment. Change `--probe_target` to `single_beaker_init.NL` to decode initial state.
+Add `--control_input` for No LM experiment.
+
+Change `--probe_target` to `single_beaker_init.NL` to decode initial state.
 
 For localization experiments, set `--localizer_type single_beaker_init_{$i}.offset{$off}` for some token `i` in `{article, pos.[R0|R1|R2], beaker.[R0|R1], verb, amount, color, end_punct}` and some integer offset `off` between 0 and 6.
 
-Saves to `probe_models_alchemy/`
+Saves probe checkpoints under `probe_models_alchemy/*`.
 
-Intervention experiments results follow from running the script:
+Intervention experiment results follow from running the script:
 ```bash
 python scripts/intervention.py \
     --arch [bart|t5] \
@@ -94,10 +100,10 @@ Begin by creating the full set of encoded proposition representations
 ```bash
 python scripts/get_all_tw_facts.py \
     --data tw_data/simple_traces --gamefile tw_data/simple_games \
-    --state_model_arch [bart|t5] [--no_pretrain] \
+    --state_model_arch [bart|t5] \
     --probe_target belief_facts_pair \
     --state_model_path <path_to_lm_checkpoint> \
-    --out_file <path_to_prop_encodings>
+    --out_file [None|pretrain|<path_to_prop_encodings>]
 ```
 
 Run the probe with
@@ -115,8 +121,10 @@ For evaluation, add `--eval_only --probe_save_path <path_to_probe_checkpoint>`.
 
 Add `--control_input` for No LM experiment.
 
-Change `--probe_target` to `init.full_belief_facts_pair` to decode initial state. For remap experiments, change `--probe_target` to `final.full_belief_facts_pair.control_with_rooms`.
+Change `--probe_target` to `init.full_belief_facts_pair` to decode initial state.
 
-For decoding from just one side of propositions, set `--probe_target belief_facts_single` and rerun both commands (first get the full proposition encodings, then run the probe).
+For remap experiments, change `--probe_target` to `final.full_belief_facts_pair.control_with_rooms`.
 
-Saves to `probe_models_textworld/`
+For decoding from just one side of propositions, replace any instance of `belief_facts_pair` with `belief_facts_single` and rerun both commands (first get the full proposition encodings, then run the probe).
+
+Saves probe checkpoints under `probe_models_textworld/*`.

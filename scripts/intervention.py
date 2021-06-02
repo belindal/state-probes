@@ -223,10 +223,8 @@ dataset, lang_v, state_v = loadData(split="train", kind="alchemy", synthetic=Tru
 dev_dataset, lang_v_dev, state_v_dev = loadData(split="dev", kind="alchemy", synthetic=True)
 best_val_loss = 10**10
 best_epoch = -1
-#dev loss
 base_lm.eval()
 
-kl_divergences_all = []
 print("Output file: " + fn)
 if args.overwrite_save or not os.path.exists(fn):
     existing_result_ids = {}
@@ -236,7 +234,8 @@ else:
     existing_result_ids = {line['id']: line for line in existing_lines}
 wf = open(fn, "w")
 all_results = []
-tot_num_batches = int(len(dev_dataset) / EVAL_BATCHSIZE)
+dev_pairs = [x for d in dev_dataset for x in d.all_pairs()] 
+tot_num_batches = int(len(dev_pairs) / EVAL_BATCHSIZE)
 for j, (inputs, lang_tgts, probe_outs, raw_state_targets, init_states) in enumerate(convert_to_transformer_batches(
     dev_dataset, tokenizer, EVAL_BATCHSIZE, include_init_state=encode_init_state, domain="alchemy", device=args.device
 )):
@@ -264,7 +263,7 @@ for j, (inputs, lang_tgts, probe_outs, raw_state_targets, init_states) in enumer
         # get original utt and prior context
         orig_utt = tokenizer.decode(orig_output[idx], skip_special_tokens=True)
         priorTxt = inputs['original_text'][idx]
-        assert tokenizer.decode(input_ids[idx], skip_special_tokens=True) == priorTxt.replace('  ', ' ').replace('\n', ' ')
+        assert tokenizer.decode(input_ids[idx], skip_special_tokens=True).replace('  ', ' ').replace('\n', ' ') == priorTxt.replace('  ', ' ').replace('\n', ' ')
         if '.' in priorTxt: priorTxt_rawstate = init_states[idx] + '. ' + priorTxt[priorTxt.index('.')+2:]
         else: priorTxt_rawstate = init_states[idx] + '. ' + priorTxt
         result["priorTxt"] = priorTxt_rawstate
