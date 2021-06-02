@@ -1,0 +1,9 @@
+*.zip
+*.tar.gz
+rlong/
+__pycache__/
+tw_data/
+sconeModels/
+twModels/
+probe_models_alchemy/
+probe_models_textworld/
