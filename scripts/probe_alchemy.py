@@ -6,22 +6,21 @@ import random
 from copy import deepcopy
 
 from transformers import AdamW
-from parseScone import loadData, getBatches, getBatchesWithInit
+from data.alchemy.parseScone import loadData
 import os
 import json
 from tqdm import tqdm
 
 from data.alchemy.alchemy_artificial_generator import execute
-from data.parse_alchemy import (
+from data.alchemy.parse_alchemy import (
     consistencyCheck, parse_utt_with_world, parse_world,
-    translate_states_to_nl, translate_nl_to_states,
 )
 from metrics.alchemy_metrics import get_state_similarity, check_val_consistency
 from data.alchemy.utils import (
-    int_to_word, gen_all_beaker_states, get_matching_state_labels, gen_all_beaker_pos,
-    gen_all_beaker_colors, gen_all_beaker_amounts,
+    int_to_word, gen_all_beaker_states, get_matching_state_labels,
+    translate_states_to_nl, translate_nl_to_states,
 )
-from data.scone_dataloader import convert_to_transformer_batches
+from data.alchemy.scone_dataloader import convert_to_transformer_batches
 from localizer.scone_localizer import SconeLocalizer
 import torch.nn.functional as F
 import itertools
@@ -101,23 +100,27 @@ torch.manual_seed(args.seed)
 random.seed(args.seed)
 
 # load (language) model
-model, encoder, tokenizer = get_lang_model(arch, lm_save_path, pretrained)
+model, encoder, tokenizer = get_lang_model(arch, lm_save_path, pretrained, device=args.device)
 
 # create/load world state encoder
 # (w/ same encoder as LM)
 state_model = None
 if encode_tgt_state:
-    state_model = get_state_encoder(encode_tgt_state.split('.')[-1], encoder, config=model.config, pretrained=pretrained, freeze_params=(encode_tgt_state.split('.')[1] != 'raw'))
+    state_model = get_state_encoder(
+        encode_tgt_state.split('.')[-1], encoder, config=model.config, pretrained=pretrained, freeze_params=(encode_tgt_state.split('.')[1] != 'raw'), device=args.device
+    )
 
 # create save path
 save_state = True
 if lm_save_path:
     output_dir = f"{f'encoded_{encode_tgt_state}' if encode_tgt_state else ''}{probe_type}" + \
-    f"_{localizer_type}{'.control_inp' if args.control_input else ''}_{probe_agg_method}{probe_attn_dim if probe_agg_method and probe_agg_method.endswith('_attn') else ''}{probe_max_tokens if probe_max_tokens else ''}{tgt_agg_method if encode_tgt_state else ''}" + \
+    f"_{localizer_type}{'.control_inp' if args.control_input else ''}_" + \
+    f"{probe_agg_method}{probe_attn_dim if probe_agg_method and probe_agg_method.endswith('_attn') else ''}{probe_max_tokens if probe_max_tokens else ''}{tgt_agg_method if encode_tgt_state else ''}" + \
     f"_{lm_save_path.split('.')[0]}_l{probe_layer}{'_' + probe_target if probe_target != 'state' else ''}_{'real' if args.nonsynthetic else 'synth'}"
 else:
-    output_dir = f"{'nopt_' if not pretrained else ''}nonfinetuned_{f'encoded_{encode_tgt_state}' if encode_tgt_state else ''}{probe_type}" + \
-    f"_{localizer_type}{'.control_inp' if args.control_input else ''}_{probe_agg_method}{probe_attn_dim if probe_agg_method and probe_agg_method.endswith('_attn') else ''}{probe_max_tokens if probe_max_tokens else ''}{tgt_agg_method if encode_tgt_state else ''}" + \
+    output_dir = f"{'nopt_' if not pretrained else ''}noft_{f'encoded_{encode_tgt_state}' if encode_tgt_state else ''}{probe_type}" + \
+    f"_{localizer_type}{'.control_inp' if args.control_input else ''}_" + \
+    f"{probe_agg_method}{probe_attn_dim if probe_agg_method and probe_agg_method.endswith('_attn') else ''}{probe_max_tokens if probe_max_tokens else ''}{tgt_agg_method if encode_tgt_state else ''}" + \
     f"_{arch}_initstate_{encode_init_state}_l{probe_layer}{'_' + probe_target if probe_target != 'state' else ''}_{'real' if args.nonsynthetic else 'synth'}"
 output_json_fn = os.path.join("probe_models_alchemy", f"{output_dir}.jsonl")
 if not os.path.exists(os.path.join("probe_models_alchemy", f"{'/'.join(output_dir.split('/')[:-1])}")):
@@ -128,7 +131,7 @@ if not probe_save_path:
 print(f"Saving probe checkpoints to {probe_save_path}")
 
 # create probe model
-probe_model = get_probe_model(probe_type, probe_agg_method, probe_attn_dim, arch, model, probe_save_path, args)
+probe_model = get_probe_model(probe_type, probe_agg_method, probe_attn_dim, arch, model, probe_save_path, args.tgt_agg_method, encode_tgt_state=args.encode_tgt_state, device=args.device)
 
 # load optimizer
 all_parameters = list(probe_model.parameters())
@@ -139,12 +142,16 @@ state_localizer = SconeLocalizer(getattr(probe_model, 'target_agg_layer', None),
 if args.encode_tgt_state:
     assert args.probe_type != 'decoder'
     full_joint_model = ProbeLinearModel(
-        vars(args), getattr(probe_model, 'config', getattr(model, 'config', None)), model, state_model, probe_model, localizer, state_localizer,
+        args.arch, getattr(probe_model, 'config', getattr(model, 'config', None)),
+        model, state_model, probe_model, args.probe_layer, args.probe_type,
+        localizer, state_localizer,
     )
 else:
     assert args.probe_type == 'decoder'
     full_joint_model = ProbeConditionalGenerationModel(
-        vars(args), getattr(probe_model, 'config', getattr(model, 'config', None)), model, state_model, probe_model, localizer, state_localizer,
+        args.arch, getattr(probe_model, 'config', getattr(model, 'config', None)),
+        model, state_model, probe_model, args.probe_layer, args.probe_type,
+        localizer, state_localizer,
     )
 
 # load data
@@ -169,7 +176,7 @@ if encode_tgt_state:
     print("Getting vectors for all possible beaker states")
     with torch.no_grad():
         if 'single_beaker_init' or 'single_beaker_final' in args.probe_target:
-            all_beaker_states, beaker_state_to_idx = gen_all_beaker_states("alchemy", args, encoding=encoding, tokenizer=tokenizer)
+            all_beaker_states, beaker_state_to_idx = gen_all_beaker_states("alchemy", args, encoding=encoding, tokenizer=tokenizer, device=args.device)
         # don't use agg here if you need to learn custom weights (i.e. using attn)
         # (otherwise have to re-encode each training step...)
         probe_agg_method = args.probe_agg_method if args.probe_agg_method == 'sum' or args.probe_agg_method == 'avg' else None
@@ -210,7 +217,7 @@ with torch.no_grad():
                 # (numtotal,1,embeddim)
                 probe_outs['all_states_encoding'] = state_model(all_state_input_ids)
                 probe_outs['all_states_attn_mask'] = all_state_attn_mask
-            probe_outs['labels'] = get_matching_state_labels(all_beaker_states, beaker_state_to_idx, probe_outs, encode_tgt_state, tokenizer) # TODO
+            probe_outs['labels'] = get_matching_state_labels(all_beaker_states, beaker_state_to_idx, probe_outs, encode_tgt_state, tokenizer, device=args.device)
         model_outs = full_joint_model(inputs['input_ids'], inputs['attention_mask'], offset_mapping=inputs['offset_mapping'], probe_outs=probe_outs, localizer_key=inputs['state_key'])
         valid_loss = model_outs["loss"]
         probe_val_loss += valid_loss*len(inputs['input_ids'])
@@ -304,7 +311,7 @@ for i in range(args.epochs):
                 # (numtotal,1,embeddim)
                 probe_outs['all_states_encoding'] = state_model(all_state_input_ids)
                 probe_outs['all_states_attn_mask'] = all_state_attn_mask
-            probe_outs['labels'] = get_matching_state_labels(all_beaker_states, beaker_state_to_idx, probe_outs, encode_tgt_state, tokenizer) # TODO
+            probe_outs['labels'] = get_matching_state_labels(all_beaker_states, beaker_state_to_idx, probe_outs, encode_tgt_state, tokenizer, device=args.device)
         probe_loss = full_joint_model(inputs['input_ids'], inputs['attention_mask'], offset_mapping=inputs['offset_mapping'], probe_outs=probe_outs, localizer_key=inputs['state_key'])["loss"]
         probe_loss.backward()
         probe_train_losses.append(probe_loss)
@@ -338,7 +345,7 @@ for i in range(args.epochs):
                     # (numtotal,1,embeddim)
                     probe_outs['all_states_encoding'] = state_model(all_state_input_ids)
                     probe_outs['all_states_attn_mask'] = all_state_attn_mask
-                probe_outs['labels'] = get_matching_state_labels(all_beaker_states, beaker_state_to_idx, probe_outs, encode_tgt_state, tokenizer) # TODO
+                probe_outs['labels'] = get_matching_state_labels(all_beaker_states, beaker_state_to_idx, probe_outs, encode_tgt_state, tokenizer, device=args.device)
 
             model_outs = full_joint_model(inputs['input_ids'], inputs['attention_mask'], offset_mapping=inputs['offset_mapping'], probe_outs=probe_outs, localizer_key=inputs['state_key'])
             valid_loss = model_outs["loss"]

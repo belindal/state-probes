@@ -3,17 +3,16 @@ from tqdm import tqdm
 import json
 import os
 from torch.utils.data import DataLoader, Dataset, IterableDataset
-from utils import DEVICE
 import glob
 from data.textworld.utils import (
     apply_mask_and_truncate, control_pairs_simple, control_pairs_with_rooms_simple,
     EntitySet, ENTITIES_SIMPLE, ROOMS_SIMPLE,
-    gen_possible_pairs, gen_negative_tgts, get_relevant_facts_about,
+    gen_possible_pairs, get_relevant_facts_about,
     load_possible_pairs, load_negative_tgts, pad_stack, remap_entset,
-)
-from data.parse_tw import (
-    parse_facts_to_nl, 
     control_tgt_to_mention_simple, control_tgt_to_mention_with_rooms_simple,
+)
+from data.textworld.parse_tw import (
+    parse_facts_to_nl,
 )
 import itertools
 from transformers import PreTrainedTokenizerBase
@@ -62,7 +61,7 @@ class TWDataset(Dataset):
         return game_ids
 
     def load_data(self):
-        init_actions_data = {'contexts': [], 'post_contexts': [], 'tgts': [], 'final_states': [], 'init_states': [], 'filenames': []}  # init state + actions
+        init_actions_data = {'contexts': [], 'tgts': [], 'final_states': [], 'init_states': [], 'filenames': []}  # init state + actions
         n_states = 0
         files = sorted(glob.glob(os.path.join(os.path.join(self.data_dir, self.data_split), "*_states.txt")))
         if self.randseed:
@@ -78,7 +77,7 @@ class TWDataset(Dataset):
             with open(langs_file) as f:
                 approx_num_toks = 0
                 for line in f:
-                    if (line.strip().startswith("***") and line.strip().endswith("***")) or approx_num_toks > 2*self.max_seq_len:
+                    if (line.strip().startswith("***") and line.strip().endswith("***")) or approx_num_toks > self.max_seq_len:
                         # loop will always end on this condition, since "The End" is in all documents
                         break
                     line = line.strip() + ' | '
@@ -96,7 +95,7 @@ class TWDataset(Dataset):
                         all_actions.append(action)
                         curr_action = []
                 # get last part
-                if line.startswith(">") and approx_num_toks + len(self.tokenizer.tokenize(line)) <= 2*self.max_seq_len:
+                if line.startswith(">") and approx_num_toks + len(self.tokenizer.tokenize(line)) <= self.max_seq_len:
                     all_actions.append(''.join(curr_action))
                     if approx_num_toks + len(self.tokenizer.tokenize(line)) <= self.max_seq_len: n_cutoff_actions += 1
             # create final_states
@@ -128,8 +127,6 @@ class TWDataset(Dataset):
                 world = os.path.join(os.path.split(world[0])[1], world[1])
                 actions = ''.join(all_actions[1:c])
                 tgt_action = all_actions[c].split('[')[0]
-                postfix = ''.join(all_actions[c:])
-                assert len(postfix) != 0
                 increment_corresponding_state = all_actions[c-1].startswith(">")  # last action in context
                 if increment_corresponding_state:
                     s += 1
@@ -138,7 +135,6 @@ class TWDataset(Dataset):
                 goal = all_actions[0].split(' | ')[0]
                 curr_context = ''.join([all_actions[0].replace(goal, ""), actions])
                 init_actions_data['contexts'].append(curr_context)
-                init_actions_data['post_contexts'].append(postfix)
                 init_actions_data['tgts'].append(tgt_action)
                 init_actions_data['init_states'].append(states[0])
                 init_actions_data['final_states'].append(states[s])
@@ -296,18 +292,18 @@ class TWEntitySetDataset(TWDataset):
                         if fact not in fact_to_idx:
                             fact = fact.replace("The player carries ", "") + " is in the inventory"
                     fact = f'{fact[0].upper()}{fact[1:]}'
-                    try: labels[fact_to_idx[fact]] = i + 1
-                    except: import pdb; pdb.set_trace()
+                    labels[fact_to_idx[fact]] = i + 1
         return labels, all_input_tokens, all_vectors
 
 
 class TWEntitySetDataLoader(DataLoader):
     def __init__(
-        self, dataset: TWDataset, tokenizer: PreTrainedTokenizerBase, batch_size: int, control_input: bool = False,
+        self, dataset: TWDataset, tokenizer: PreTrainedTokenizerBase, batch_size: int, control_input: bool = False, device: str = 'cuda',
     ):
         super().__init__(dataset, batch_size, collate_fn=self.collate_fn)
         self.tokenizer = tokenizer
         self.control_input = control_input
+        self.device = device
         
     """
     state_keys_to_get: [(init/final_state, key); (init/final_state, key)]
@@ -323,7 +319,7 @@ class TWEntitySetDataLoader(DataLoader):
         max_len (int)
         """
         tokenized_inputs = self.tokenizer(inputs, return_tensors='pt', padding=True, truncation=False)
-        return {k: apply_mask_and_truncate(tokenized_inputs[k], mask, max_len,) for k in tokenized_inputs}
+        return {k: apply_mask_and_truncate(tokenized_inputs[k], mask, max_len, self.device) for k in tokenized_inputs}
     
     def collate_fn(self, batch):
         new_batch = {k: [] for k in batch[0]}
@@ -347,7 +343,7 @@ class TWEntitySetDataLoader(DataLoader):
         items_to_keep = context_tokens['attention_mask'].sum(1) <= self.tokenizer.model_max_length
         if not items_to_keep.any():
             return None, None, None, None, batch['game_ids'], None
-        context_tokens = {k: apply_mask_and_truncate(context_tokens[k], items_to_keep, self.tokenizer.model_max_length) for k in context_tokens}
+        context_tokens = {k: apply_mask_and_truncate(context_tokens[k], items_to_keep, self.tokenizer.model_max_length, self.device) for k in context_tokens}
         # get lang tgts
         tgt_tokens = self.tokenize_truncate(batch['tgts'], items_to_keep, self.tokenizer.model_max_length)
         # get state tgts
@@ -367,13 +363,15 @@ class TWEntitySetDataLoader(DataLoader):
 
         # labels
         # (bs, # facts, seqlen[, embeddim])
-        state_tokens['tgt_states']['all_states_input_ids'], state_tokens['tgt_states']['all_states_attn_mask'] = pad_stack(batch['all_states_tokenized'], pad_idx=self.tokenizer.pad_token_id, device=DEVICE)
-        state_tokens['tgt_states']['all_states_encoding'], encoding_mask = pad_stack(batch['all_states_encoded'], pad_idx=0, device=DEVICE)
+        state_tokens['tgt_states']['all_states_input_ids'], state_tokens['tgt_states']['all_states_attn_mask'] = pad_stack(
+            batch['all_states_tokenized'], pad_idx=self.tokenizer.pad_token_id, device=self.device,
+        )
+        state_tokens['tgt_states']['all_states_encoding'], encoding_mask = pad_stack(batch['all_states_encoded'], pad_idx=0, device=self.device)
         assert (encoding_mask == state_tokens['tgt_states']['all_states_attn_mask']).all()
         max_nfacts = state_tokens['tgt_states']['all_states_input_ids'].size(1)
         # (bs, # facts)
         labels = [lentry + [-1 for _ in range(max_nfacts-len(lentry))] for lentry in batch['labels']]
-        labels = torch.tensor(labels).to(DEVICE)
+        labels = torch.tensor(labels).to(self.device)
         assert ((labels != -1) == state_tokens['tgt_states']['all_states_attn_mask'][:,:,0]).all()
         state_tokens['tgt_states']['labels'] = labels
 
@@ -383,7 +381,7 @@ class TWEntitySetDataLoader(DataLoader):
 class TWFullDataLoader(DataLoader):
     def __init__(
         self, dataset: TWDataset, gamefile, tokenizer, batch_size, state_keys_to_get=[], max_gt_grounded_states=float("inf"), states=None,
-        append_facts_to_input=False, include_feedback=False, nnegs=0, npos=1
+        append_facts_to_input=False, include_feedback=False, nnegs=0, npos=1, device='cuda',
     ):
         """
         states: new set of states (must have 1 per sample for entire dataset) to override loaded states
@@ -408,6 +406,7 @@ class TWFullDataLoader(DataLoader):
         self.nnegs = nnegs
         self.npos = npos
         self.append_facts_to_input = append_facts_to_input
+        self.device = device
     
     def update_state(self, new_states):
         self.states = new_states
@@ -415,24 +414,17 @@ class TWFullDataLoader(DataLoader):
     def collate_fn(self, batch):
         game_ids = [item['filenames'].split('_')[0] for item in batch]
         contexts = [item['contexts'] for item in batch]
-        post_contexts = [item['post_contexts'] for item in batch]
         context_tokens = self.tokenizer(contexts, return_tensors='pt', padding=True, truncation=False)
-        post_context_tokens = self.tokenizer(post_contexts, return_tensors='pt', padding=True, truncation=True, max_length=128)
-        full_context_tokens = self.tokenizer([
-            contexts[j] + ' [SEP] ' + post_contexts[j] for j in range(len(batch))
-        ], return_tensors='pt', padding=True, truncation=False)
         items_to_keep = context_tokens['attention_mask'].sum(1) <= self.tokenizer.model_max_length
         if not items_to_keep.any():
             return None, None, None, None, game_ids, None
 
         # Delete problematic example(s) + truncate rest
-        context_tokens = {key: apply_mask_and_truncate(context_tokens[key], items_to_keep, self.tokenizer.model_max_length) for key in context_tokens}
-        post_context_tokens = {key: apply_mask_and_truncate(post_context_tokens[key], items_to_keep, self.tokenizer.model_max_length) for key in post_context_tokens}
-        full_context_tokens = {key: apply_mask_and_truncate(full_context_tokens[key], items_to_keep, self.tokenizer.model_max_length) for key in full_context_tokens}
+        context_tokens = {key: apply_mask_and_truncate(context_tokens[key], items_to_keep, self.tokenizer.model_max_length, self.device) for key in context_tokens}
         tgts = [item['tgts'] for item in batch]
         tgt_tokens = self.tokenizer(tgts, return_tensors='pt', padding=True, truncation=True)
         # delete problem examples
-        tgt_tokens = {key: apply_mask_and_truncate(tgt_tokens[key], items_to_keep, self.tokenizer.model_max_length) if type(tgt_tokens[key]) == torch.Tensor else tgt_tokens[key] for key in tgt_tokens}
+        tgt_tokens = {key: apply_mask_and_truncate(tgt_tokens[key], items_to_keep, self.tokenizer.model_max_length, self.device) if type(tgt_tokens[key]) == torch.Tensor else tgt_tokens[key] for key in tgt_tokens}
         
         init_states = {}
         final_state = {}
@@ -470,11 +462,10 @@ class TWFullDataLoader(DataLoader):
             init_state_tokens[state_key] = {}
             tgt_state_tokens[state_key] = {}
             for tf in init_states[state_key]:
-                tokenized_init_tf = self.tokenizer(init_states[state_key][tf], return_tensors='pt', padding=True, truncation=True).to(DEVICE)
-                tokenized_tgt_tf = self.tokenizer(final_state[state_key][tf], return_tensors='pt', padding=True, truncation=True).to(DEVICE)
+                tokenized_init_tf = self.tokenizer(init_states[state_key][tf], return_tensors='pt', padding=True, truncation=True).to(self.device)
+                tokenized_tgt_tf = self.tokenizer(final_state[state_key][tf], return_tensors='pt', padding=True, truncation=True).to(self.device)
                 for k2 in tokenized_init_tf:
                     init_state_tokens[state_key][f'{k2}{"_"+tf if tf != "true" else ""}'] = tokenized_init_tf[k2]
                     tgt_state_tokens[state_key][f'{k2}{"_"+tf if tf != "true" else ""}'] = tokenized_tgt_tf[k2]
         game_ids = [gid for gidx, gid in enumerate(game_ids) if items_to_keep[gidx]]
-        context_tokens = {**context_tokens, **{f'post_{key}': post_context_tokens[key] for key in post_context_tokens}, **{f'full_{key}': full_context_tokens[key] for key in full_context_tokens}}
         return context_tokens, tgt_tokens, init_state_tokens, tgt_state_tokens, game_ids, 'all'

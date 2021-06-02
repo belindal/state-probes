@@ -1,9 +1,6 @@
-from typing import Iterable
-
 import json
 import logging
 import os
-import pdb
 import torch
 from tqdm import tqdm
 import textworld
@@ -12,7 +9,6 @@ from textworld.logic import Signature, Proposition, Action, Variable, Type
 import torch.nn.functional as F
 from torch import nn
 import itertools
-from utils import DEVICE
 from data.textworld.utils import EntitySet
 
 
@@ -108,7 +104,6 @@ def parse_nl_to_facts(nl_facts, game_state, gameid, get_orig=False, cached_templ
                     param_idx_to_nl_position.append(param_idx)
             param_idx_to_nl_position = [i[0] for i in sorted(enumerate(param_idx_to_nl_position), key=lambda x:x[1])]
             if regex in cached_templates[gameid]:
-                # import pdb; pdb.set_trace()
                 assert param_idx_to_nl_position == cached_templates[gameid][regex]['param_idx_to_nl_position']
                 assert predicates[signature][0].name == cached_templates[gameid][regex]['predicate'].name
                 assert predicates[signature][0].parameters[0].name == cached_templates[gameid][regex]['predicate'].parameters[0].name

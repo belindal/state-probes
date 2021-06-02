@@ -45,12 +45,12 @@ parser.add_argument('--save_path', type=str, default=None)
 parser.add_argument('--local_files_only', action='store_true', default=False)
 args = parser.parse_args()
 
+pretrained = not args.no_pretrain
 # make save path
 os.makedirs('sconeModels', exist_ok=True)
 if not args.save_path:
     savePath = f'sconeModels/{"synth" if args.synthetic else "real"}_{"pre" if pretrained else "nopre"}{args.arch}_encInitState={args.encode_init_state}.p'
 else: savePath = args.save_path
-pretrained = not args.no_pretrain
 random.seed(args.seed)
 
 # creating model
@@ -89,6 +89,7 @@ optimizer = AdamW(list(model.parameters()), lr=args.lr)
 dataset, lang_v, state_v = loadData(split="train", kind="alchemy", synthetic=args.synthetic)
 dev_dataset, lang_v_dev, state_v_dev = loadData(split="dev", kind="alchemy", synthetic=args.synthetic)
 best_val_loss = 10**10
+best_val_consistency = 0.0
 best_epoch = -1
 all_train_states = [" ".join(state) for _, _, state in [x for d in dataset for x in d.all_pairs()] ]
 all_dev_states = [" ".join(state) for _, _, state in [x for d in dev_dataset for x in d.all_pairs()] ]
@@ -118,11 +119,8 @@ for i in range(args.epochs):
         optimizer.step()
         if j%100 == 0:
             print(f"epoch {i}, batch {j}, lang score: {lang_loss.item()}", flush=True)
-            # break
-            # TODO delete
 
     print(f"epoch {i}, average lang loss {sum(lang_train_losses).item()/len(lang_train_losses)}")
-    #dev loss
     model.eval()
     with torch.no_grad():
         tot_val_loss = 0
@@ -152,35 +150,16 @@ for i in range(args.epochs):
 
         print("n_val", n_val)
         avg_val_loss = tot_val_loss.item()/n_val
-        print(f"epoch {i}, avg val loss: {avg_val_loss}, fraction consistent: {n_val_consistent/n_val} ")
+        avg_val_consistency = n_val_consistent/n_val
+        print(f"epoch {i}, avg val loss: {avg_val_loss}, fraction consistent: {avg_val_consistency}")
         
-        if avg_val_loss <= best_val_loss:
+        if (args.synthetic and avg_val_consistency >= best_val_consistency) or (not args.synthetic and avg_val_loss <= best_val_loss):
             print("NEW BEST MODEL")
             model.epoch = i
             best_val_loss = avg_val_loss
+            best_val_consistency = avg_val_consistency
             torch.save(model.state_dict(), savePath)
             best_epoch = i
 
-        elif avg_val_loss > best_val_loss:
-            print("model val loss went up")
-
-        #hack to get first samples
-        for _, (inputs, lang_tgts, state_tgts, raw_state_targets, init_states) in enumerate(
-            convert_to_transformer_batches(
-                dev_dataset, tokenizer, args.batchsize, include_init_state=args.encode_init_state, domain="alchemy", device=args.device,
-            )
-        ):
-            break
-
-        #generate
-        if args.synthetic:
-            n_consistent, preds_batch = check_val_consistency(
-                model, tokenizer, inputs, lang_tgts, init_states=init_states,
-                included_init_state=args.encode_init_state, return_texts=True,
-            )
-            for i in range(len(preds_batch['prior'])):
-                print("prior text:\n\t", preds_batch['prior'][i])
-                print("ground truth next sentence:\n\t", preds_batch['gold'][i])
-                print("generated from model:\n\t", preds_batch['gen'][i])
-                print("consistent guess?", preds_batch['consistent'][i])
-                print()
+        else:
+            print(f"model val {'consistency' if args.synthetic else 'loss'} went {'down' if args.synthetic else 'up'}")

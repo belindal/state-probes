@@ -4,10 +4,12 @@ import torch
 from torch import nn
 from data.alchemy.alchemy_artificial_generator import execute
 from data.alchemy.parse_alchemy import (
-    consistencyCheck, parse_utt_with_world, parse_world, translate_states_to_nl,
+    consistencyCheck, parse_utt_with_world, parse_world,
 )
 from data.alchemy.parseScone import getBatchesWithInit
-from data.alchemy.utils import check_well_formedness, word_to_int, colors, d_colors as char_to_color
+from data.alchemy.utils import (
+    check_well_formedness, word_to_int, colors, d_colors as char_to_color, translate_states_to_nl,
+)
 import itertools
 import Levenshtein
 from transformers.modeling_outputs import BaseModelOutput
@@ -83,10 +85,8 @@ def get_state_similarity(orig_state1, orig_state2, domain, target):
         # non-well-formed inputs
         return 0.0
     if not check_well_formedness(orig_state1) or not check_well_formedness(orig_state2): return 0.0
-    try:
-        state1 = translate_beaker_nl_to_state_list(orig_state1)
-        state2 = translate_beaker_nl_to_state_list(orig_state2)
-    except (ValueError, KeyError, IndexError): import pdb; pdb.set_trace()
+    state1 = translate_beaker_nl_to_state_list(orig_state1)
+    state2 = translate_beaker_nl_to_state_list(orig_state2)
 
     # compare state1 and state2
     n_match = 0.0
@@ -131,11 +131,7 @@ def check_val_consistency(
     consistent_list = []
 
     for i in range(len(generated)):
-        #print("len generated", len(generated))
-        try:
-            priorTxt = tokenizer.decode(inputs['input_ids'][i], skip_special_tokens=True)
-        except:
-            import pdb; pdb.set_trace()
+        priorTxt = tokenizer.decode(inputs['input_ids'][i], skip_special_tokens=True)
         if included_init_state == 'NL':
             prior_utts = priorTxt[priorTxt.index('.')+2:]
             priorTxt_rawstate = init_states[i] + '. ' + prior_utts
@@ -150,12 +146,7 @@ def check_val_consistency(
         else:
             genTxt = generated[i]
 
-        try:
-            assert consistencyCheck(priorTxt_rawstate, gtTxt)
-        except:
-            import pdb
-            pdb.set_trace()
-            assert consistencyCheck(priorTxt_rawstate, gtTxt)
+        assert consistencyCheck(priorTxt_rawstate, gtTxt)
         gen_consistent = consistencyCheck(priorTxt_rawstate, genTxt)
         n_consistent += gen_consistent
 
@@ -166,27 +157,3 @@ def check_val_consistency(
     if return_texts:
         return n_consistent, {'prior': prior_list, 'gold': gt_list, 'gen': gen_list, 'consistent': consistent_list}
     return n_consistent
-
-
-def get_matching_state_labels(all_states, beaker_state_to_idx, target_states, encode_tgt_state, tokenizer):
-    """
-    get indices of `target_states` among `all_states`
-    (for creating label)
-
-    Both are tokenized {'input_ids': torch.tensor, 'attention_mask': torch.tensor}
-    """
-    bs = target_states['input_ids'].size(0)
-
-    labels = []
-    for i in range(len(target_states['input_ids'])):
-        if encode_tgt_state.split('.')[0] == 'NL':
-            target = tokenizer.decode(target_states['input_ids'][i], skip_special_tokens=True)
-        elif encode_tgt_state.split('.')[0] == 'raw':
-            target = tokenizer.decode(target_states['input_ids'][i], skip_special_tokens=True)
-        labels.append(beaker_state_to_idx[target])
-
-    labels = torch.tensor(labels).to(DEVICE)
-    if encode_tgt_state.split('.')[0] == 'NL':
-        assert (all_states['input_ids'][labels][all_states['attention_mask'][labels].bool()] == target_states['input_ids'][target_states['attention_mask'].bool()]).all()
-    return labels
-

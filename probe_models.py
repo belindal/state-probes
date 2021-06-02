@@ -15,16 +15,15 @@ from transformers import PreTrainedModel
 import os
 import json
 from tqdm import tqdm
-from utils import DEVICE, encodeState
+from data.alchemy.utils import encodeState
 
-import Levenshtein
 import torch.nn.functional as F
 import itertools
 import sys
 from localizer import LocalizerBase
 
 
-def get_lang_model(arch, lm_save_path, pretrained=True, local_files_only=False, n_layers=None):
+def get_lang_model(arch, lm_save_path, pretrained=True, local_files_only=False, n_layers=None, device='cuda'):
     if arch == 'bart':
         model_class = BartForConditionalGeneration
         config_class = BartConfig
@@ -61,11 +60,11 @@ def get_lang_model(arch, lm_save_path, pretrained=True, local_files_only=False, 
     encoder = model.get_encoder()
     for p in model.parameters():
         p.requires_grad = False
-    model.to(DEVICE)
+    model.to(device)
     return model, encoder, tokenizer
 
 
-def get_state_encoder(arch, encoder=None, config=None, pretrained=True, freeze_params=True, local_files_only=False, n_layers=None):
+def get_state_encoder(arch, encoder=None, config=None, pretrained=True, freeze_params=True, local_files_only=False, n_layers=None, device='cuda'):
     # create/load world state encoder
     # (w/ same encoder as LM)
     print(f"Creating {arch}-style world state encoder")
@@ -90,7 +89,7 @@ def get_state_encoder(arch, encoder=None, config=None, pretrained=True, freeze_p
                 state_model = T5ForConditionalGeneration(config)
         encoder = state_model.get_encoder()
     if arch == "mlp":
-        input_dim = encodeState('alchemy', '1:').size(0)
+        input_dim = encodeState('alchemy', '1:', device).size(0)
         encoder = nn.Sequential(
             nn.Linear(input_dim, config.d_model),
             nn.Sigmoid(),
@@ -102,11 +101,10 @@ def get_state_encoder(arch, encoder=None, config=None, pretrained=True, freeze_p
         for p in encoder.parameters():
             p.requires_grad = False
 
-    encoder.to(DEVICE)
+    encoder.to(device)
     return encoder
 
-
-def get_probe_model(probe_type, localizer_type, probe_attn_dim, arch, lang_model, probe_save_path, args, local_files_only=False):
+def get_probe_model(probe_type, localizer_type, probe_attn_dim, arch, lang_model, probe_save_path, tgt_agg_method, encode_tgt_state=None, local_files_only=False, device='cuda'):
     load_probe = False
     if probe_save_path and os.path.exists(probe_save_path):
         load_probe = True
@@ -116,8 +114,7 @@ def get_probe_model(probe_type, localizer_type, probe_attn_dim, arch, lang_model
     if probe_type == 'decoder':
         if arch =='bart':
             if not load_probe:
-                probe_model = BartForConditionalGeneration.from_pretrained('facebook/bart-base', dropout=args.dropout, local_files_only=local_files_only)
-                # probe_model = BartForConditionalGeneration(BartConfig.from_pretrained('facebook/bart-base', dropout=args.dropout))
+                probe_model = BartForConditionalGeneration.from_pretrained('facebook/bart-base', local_files_only=local_files_only)
             else:
                 config = BartConfig.from_pretrained('facebook/bart-base', local_files_only=local_files_only)
                 probe_model = BartForConditionalGeneration(config)
@@ -145,67 +142,42 @@ def get_probe_model(probe_type, localizer_type, probe_attn_dim, arch, lang_model
         raise NotImplementedError()
 
     # create aggregation layer
-    if localizer_type == 'linear':
-        # TODO variable
-        agg_layer = nn.Linear(lang_model.config.d_model, probe_attn_dim)
-        probe_model.agg_layer = agg_layer
-        probe_model.target_agg_layer = agg_layer
     if localizer_type and localizer_type.endswith('_attn'):
         if localizer_type.startswith('lin_'):
-            # import pdb; pdb.set_trace()
             agg_layer = nn.Sequential(
                 nn.Linear(lang_model.config.d_model, probe_attn_dim),
-                # nn.Softmax(1),
             )
         elif localizer_type.startswith('ffn_'):
             agg_layer = nn.Sequential(
                 nn.Linear(lang_model.config.d_model, lang_model.config.d_model),
                 nn.Sigmoid(),
                 nn.Linear(lang_model.config.d_model, probe_attn_dim),
-                # nn.Softmax(1),
             )
         elif localizer_type.startswith('self_'):
             agg_layer = Attention(
                 lang_model.config.d_model,
                 lang_model.config.encoder_attention_heads, 
-                dropout=args.dropout,
             )
         else: assert False
         probe_model.agg_layer = agg_layer
         probe_model.target_agg_layer = agg_layer
-    if args.encode_tgt_state and args.tgt_agg_method == 'linear':
-        # TODO variable
-        target_agg_layer = nn.Linear(110, probe_attn_dim)
-        probe_model.target_agg_layer = target_agg_layer
-    # elif args.encode_tgt_state and args.tgt_agg_method == 'mlp':
-    #     if args.encode_tgt_state.split('.')[0] == "NL": input_dim = lang_model.config.d_model
-    #     else: input_dim = encodeState('alchemy', '1:').size(0)
-    #     encoder = nn.Sequential(
-    #         nn.Linear(input_dim, lang_model.config.d_model),
-    #         nn.Sigmoid(),
-    #         nn.Linear(lang_model.config.d_model, lang_model.config.d_model),
-    #     )
-    #     probe_model.target_agg_layer = target_agg_layer
-    if args.tgt_agg_method and args.tgt_agg_method.endswith('_attn'):
-        if args.encode_tgt_state.split('.')[0] == "NL": input_dim = lang_model.config.d_model
-        else: input_dim = encodeState('alchemy', '1:').size(0)
-        if args.tgt_agg_method.startswith('lin_'):
+    if tgt_agg_method and tgt_agg_method.endswith('_attn'):
+        if encode_tgt_state.split('.')[0] == "NL": input_dim = lang_model.config.d_model
+        else: input_dim = encodeState('alchemy', '1:', device).size(0)
+        if tgt_agg_method.startswith('lin_'):
             target_agg_layer = nn.Sequential(
                 nn.Linear(input_dim, probe_attn_dim),
-                # nn.Softmax(1),
             )
-        elif args.tgt_agg_method.startswith('ffn_'):
+        elif tgt_agg_method.startswith('ffn_'):
             target_agg_layer = nn.Sequential(
                 nn.Linear(input_dim, input_dim),
                 nn.Sigmoid(),
                 nn.Linear(input_dim, probe_attn_dim),
-                # nn.Softmax(1),
             )
-        elif args.tgt_agg_method.startswith('self_'):
+        elif tgt_agg_method.startswith('self_'):
             target_agg_layer = Attention(
                 input_dim,
                 lang_model.config.encoder_attention_heads, 
-                dropout=args.dropout,
             )
         else: assert False
         probe_model.target_agg_layer = target_agg_layer
@@ -215,7 +187,7 @@ def get_probe_model(probe_type, localizer_type, probe_attn_dim, arch, lang_model
         if probe_type == 'decoder':
             if arch == 't5': probe_model.encoder = lang_model.get_encoder()
             elif arch == 'bart': probe_model.model.encoder = lang_model.get_encoder()
-    probe_model.to(DEVICE)
+    probe_model.to(device)
     return probe_model
 
 
@@ -262,26 +234,21 @@ class ProbeLanguageEncoder(nn.Module):
             return localized_encodings, localized_encodings_mask, hidden_states, attentions
 
 
-# TODO
-# superclass = BartForConditionalGeneration
-# superclass = T5ForConditionalGeneration
-# TODO not BART-specific
 class ProbeBaseModel(PreTrainedModel):
     def __init__(
-        self, args, config, base_lm, base_state_model, probe_base_model, localizer, state_localizer,
+        self, arch, config, base_lm, base_state_model, probe_base_model, probe_layer, probe_type, localizer, state_localizer,
     ):
-        # TODO check config is correct
         super().__init__(config)
-        self.args = args
+        self.arch = arch
         self.config = config
-        # must have `model`, `localizer_type`, `probe_attn_dim`, `probe_max_tokens`, `probe_layer`, `encode_tgt_state`, `probe_type`
         self.base_lm = base_lm
         self.base_state_model = base_state_model
         self.probe_base_model = probe_base_model
+        self.probe_type = probe_type
         self.localizer = localizer
         # localizes corresponding state
         self.state_localizer = state_localizer
-        self.encoder = ProbeLanguageEncoder(self.args['arch'], self.args['probe_layer'], self.base_lm, self.probe_base_model, self.localizer)
+        self.encoder = ProbeLanguageEncoder(arch, probe_layer, self.base_lm, self.probe_base_model, self.localizer)
     
     def get_encoder(self):
         return self.encoder
@@ -289,10 +256,9 @@ class ProbeBaseModel(PreTrainedModel):
 
 class ProbeLinearModel(ProbeBaseModel):
     def __init__(
-        self, args, config, base_lm, base_state_model, probe_base_model, localizer, state_localizer,
+        self, arch, config, base_lm, base_state_model, probe_base_model, probe_layer, probe_type, localizer, state_localizer,
     ):
-        # TODO check config is correct
-        super().__init__(args, config, base_lm, base_state_model, probe_base_model, localizer, state_localizer)
+        super().__init__(arch, config, base_lm, base_state_model, probe_base_model, probe_layer, probe_type, localizer, state_localizer)
     
     def forward(
         self, input_ids, attention_mask, offset_mapping=None, probe_outs=None,
@@ -309,16 +275,16 @@ class ProbeLinearModel(ProbeBaseModel):
         
         # apply probe (transform on language encoding to state space)
         # (bsz, hidden_dim)
-        if not self.args['probe_type'][1:].startswith('linear'):
+        if not self.probe_type[1:].startswith('linear'):
             transformed_encoded_reps = self.probe_base_model(probe_inputs)
             if len(transformed_encoded_reps.size()) == 3: transformed_encoded_reps = transformed_encoded_reps.sum(1)
-            if self.args['probe_type'] == "lstm":
+            if self.probe_type == "lstm":
                 # (bsz, seqlen, embeddim)
                 transformed_encoded_reps = transformed_encoded_reps[0]
 
         # create encoding for states
         # (# total, seqlen, embeddim)
-        all_vectors = probe_outs['all_states_encoding'].to(DEVICE)
+        all_vectors = probe_outs['all_states_encoding'].to(self.device)
         if len(all_vectors.size()) > 3:
             all_vectors = all_vectors.view(-1, all_vectors.size(-2), all_vectors.size(-1))
             probe_outs['all_states_input_ids'] = probe_outs['all_states_input_ids'].view(-1, probe_outs['all_states_input_ids'].size(-1))
@@ -330,15 +296,7 @@ class ProbeLinearModel(ProbeBaseModel):
             all_vectors = all_vectors.squeeze(1)
             all_vectors_mask = all_vectors_mask.squeeze(1)
 
-        if self.args['probe_type'][1:] == 'linear_classify':
-            '''
-            if all_vectors.size(0) == len(probe_outs['entities']) * probe_outs['labels'].size(1):
-                all_vectors = all_vectors.view(len(probe_outs['entities']), probe_outs['labels'].size(1), -1)
-                transformed_encoded_reps = transformed_encoded_reps.unsqueeze(1).expand_as(all_vectors)
-            # (bsz, # states, 3) labels = [0=N,1=T,2=F]
-            similarity_scores = self.probe_base_model.classifier(torch.cat([transformed_encoded_reps, all_vectors], dim=-1))
-            probe_loss = F.cross_entropy(similarity_scores.view(-1, 3), probe_outs['labels'].view(-1))
-            '''
+        if self.probe_type[1:] == 'linear_classify':
             bs, numnegs, embeddim = probe_outs['all_states_encoding'].size(0), probe_outs['all_states_encoding'].size(1), all_vectors.size(-1)
             # n-way classification
             # (bs*c, #negs, embeddim)
@@ -356,31 +314,12 @@ class ProbeLinearModel(ProbeBaseModel):
                 probe_loss = F.cross_entropy(similarity_scores[all_vectors_mask], probe_outs['labels'][label_mask])
             else:
                 probe_loss = None
-            '''
-            # 2-way thresholding
-            # (bsz, # total examples)
-            similarity_scores = torch.matmul(transformed_encoded_reps, all_vectors.t())
-            # 2-way classification
-            criterion = nn.BCEWithLogitsLoss()
-            # probe_loss = criterion(similarity_scores, probe_outs['labels'].float())
-            probe_loss = criterion(similarity_scores, (probe_outs['labels'] == 1).float())
-            # '''
             extra_returns['similarity'] = similarity_scores
-        else:  #if self.args['probe_type'].endswith('retrieve'):
+        else:
             # (bsz, # total examples)
             similarity_scores = torch.matmul(transformed_encoded_reps, all_vectors.t())
             probe_loss = F.cross_entropy(similarity_scores, probe_outs['labels'])
             # batchwise negatives
-            '''
-            # retrieve similarities to in-batch negatives
-            # (bsz, bsz)
-            batch_similarities = transformed_encoded_reps.mm(probe_inputs.t())
-
-            # use batch negatives
-            # compute NCE mutual info similarity between transformed lang and state encoding
-            # probe_loss = InfoNCELoss(transformed_lang_reps, gold_labels=torch.eye(transformed_lang_reps.size(0)).to(DEVICE).long())
-            probe_loss = F.cross_entropy(batch_similarities, torch.LongTensor(torch.arange(batch_similarities.size(0))).to(DEVICE))
-            '''
             extra_returns["similarity"] = similarity_scores
 
         return {"loss": probe_loss, **extra_returns}
@@ -388,10 +327,9 @@ class ProbeLinearModel(ProbeBaseModel):
 
 class ProbeConditionalGenerationModel(ProbeBaseModel):
     def __init__(
-        self, args, config, base_lm, base_state_model, probe_base_model, localizer, state_localizer,
+        self, arch, config, base_lm, base_state_model, probe_base_model, probe_layer, localizer, state_localizer,
     ):
-        # TODO check config is correct
-        super().__init__(args, config, base_lm, base_state_model, probe_base_model, localizer, state_localizer)
+        super().__init__(arch, config, base_lm, base_state_model, probe_base_model, probe_layer, localizer, state_localizer)
     
     def prepare_inputs_for_generation(self, inputs, **kwargs):
         return self.probe_base_model.prepare_inputs_for_generation(inputs, **kwargs)
@@ -414,16 +352,12 @@ class ProbeConditionalGenerationModel(ProbeBaseModel):
         else:
             probe_inputs = encoder_outputs.last_hidden_state
 
-        assert self.args['probe_type'] == 'decoder'
-        if len(probe_inputs.size()) == 2:
-            import pdb; pdb.set_trace()
-            probe_inputs = probe_inputs.unsqueeze(1)
-            # probe_inputs_mask = probe_inputs_mask.unsqueeze(1)
+        assert self.probe_type == 'decoder'
+        assert len(probe_inputs.size()) > 2
         if probe_outs:
             # override `labels` and `decoder_input_ids`
             labels = probe_outs['input_ids']
             decoder_input_ids = probe_outs['input_ids']
-            # extra_returns["decoder_inputs_mask"] = probe_inputs_mask
         all_returns = self.probe_base_model(input_ids=None, encoder_outputs=(probe_inputs,), decoder_input_ids=decoder_input_ids, labels=labels, **kwargs)
         return ModelOutput(
             **all_returns,

@@ -1,14 +1,15 @@
+from typing import Iterable
 
 import torch
 from tqdm import tqdm
 import json
 import os
 from torch.utils.data import DataLoader, Dataset, IterableDataset
-from utils import DEVICE
 import glob
 import itertools
 from transformers import PreTrainedTokenizerBase
 import regex as re
+import textworld
 
 
 class EntitySet:
@@ -125,18 +126,18 @@ def load_negative_tgts(negative_tgts_fn=None, data_dir=None, ent_set_size=None, 
         negative_tgts_serialized = torch.load(negative_tgts_fn)
         return negative_tgts_serialized
     elif game_ids is not None:
-        return gen_negative_tgts(data_dir, state_encoder, None, tokenizer, game_ids, ent_set_size)
+        return gen_all_facts(data_dir, state_encoder, None, tokenizer, game_ids, ent_set_size)
     else:
         return None
 
 
-def apply_mask_and_truncate(tensor, mask, max_len,):
+def apply_mask_and_truncate(tensor, mask, max_len, device):
     """
     tensor (bsz, seqlen, *)
     mask (bsz)
     max_len (int)
     """
-    return tensor[mask][:,:max_len].to(DEVICE)
+    return tensor[mask][:,:max_len].to(device)
 
 
 def remap_entset(entset, control_mapping):
@@ -197,7 +198,7 @@ def gen_possible_pairs(data_dir, game_ids):
     return all_possible_pairs, type_to_gid_to_ents
 
 
-def gen_negative_tgts(gamefile, state_encoder, probe_outs, tokenizer, game_ids, ent_set_size):
+def gen_all_facts(gamefile, state_encoder, probe_outs, tokenizer, game_ids, ent_set_size, device):
     game_id_to_entities = {}
     game_id_to_objs = {}
     game_ids_to_kb = {}
@@ -214,14 +215,14 @@ def gen_negative_tgts(gamefile, state_encoder, probe_outs, tokenizer, game_ids, 
             }
             game_id_to_objs[game_id] = game_id_to_entities[game_id]['o']
     if ent_set_size == 2:
-        return gen_all_facts_pairs(state_encoder, probe_outs, tokenizer, game_ids, game_id_to_entities, game_ids_to_kb)
+        return gen_all_facts_pairs(state_encoder, probe_outs, tokenizer, game_ids, game_id_to_entities, game_ids_to_kb, device)
     elif ent_set_size == 1:
-        return gen_all_facts_single(state_encoder, probe_outs, tokenizer, game_ids, game_id_to_entities, game_ids_to_kb)
+        return gen_all_facts_single(state_encoder, probe_outs, tokenizer, game_ids, game_id_to_entities, game_ids_to_kb, device)
     else:
         raise AssertionError
 
 
-def gen_all_facts_single(state_encoder, probe_outs, tokenizer, game_ids, game_id_to_entities, game_ids_to_kb):
+def gen_all_facts_single(state_encoder, probe_outs, tokenizer, game_ids, game_id_to_entities, game_ids_to_kb, device):
     SPLIT_SIZE = 128
     fact_to_template = {}
     all_facts = []
@@ -300,7 +301,7 @@ def gen_all_facts_single(state_encoder, probe_outs, tokenizer, game_ids, game_id
         probe_outs['idx_to_state'][entset_serialize] = list(set(probe_outs['idx_to_state'][entset_serialize]))
         probe_outs['state_to_idx'][entset_serialize] = {fact: i for i, fact in enumerate(probe_outs['idx_to_state'][entset_serialize])}
         # input_ids: ([bs *] # facts, seqlen), attention_mask: ([bs *] # facts, seqlen)
-        probe_outs['all_entity_inputs'][entset_serialize] = tokenizer(probe_outs['idx_to_state'][entset_serialize], return_tensors='pt', padding=True, truncation=True).to(DEVICE)
+        probe_outs['all_entity_inputs'][entset_serialize] = tokenizer(probe_outs['idx_to_state'][entset_serialize], return_tensors='pt', padding=True, truncation=True).to(device)
 
         encoded_inputs = []
         # save memory
@@ -324,7 +325,7 @@ def gen_all_facts_single(state_encoder, probe_outs, tokenizer, game_ids, game_id
     return probe_outs
 
 
-def gen_all_facts_pairs(state_encoder, probe_outs, tokenizer, game_ids, game_id_to_entities, game_ids_to_kb):
+def gen_all_facts_pairs(state_encoder, probe_outs, tokenizer, game_ids, game_id_to_entities, game_ids_to_kb, device):
     # entity -> all possible facts pertaining to that entity
     # entities: list of batch's entities to probe for...
     # get all containers
@@ -402,8 +403,8 @@ def gen_all_facts_pairs(state_encoder, probe_outs, tokenizer, game_ids, game_id_
         # input_ids: ([bs *] # facts, seqlen), attention_mask: ([bs *] # facts, seqlen)
         token_all_facts[entset_serialize] = tokenizer(batch_all_facts[entset_serialize], return_tensors='pt', padding=True, truncation=True)
         
-        tokens = token_all_facts[entset_serialize].to(DEVICE)
-        vectors = state_encoder(input_ids=tokens['input_ids'], attention_mask=tokens['attention_mask'], return_dict=True).last_hidden_state.to('cpu')  #OOMs here...
+        tokens = token_all_facts[entset_serialize].to(device)
+        vectors = state_encoder(input_ids=tokens['input_ids'], attention_mask=tokens['attention_mask'], return_dict=True).last_hidden_state.to('cpu')
 
         '''
         model forward

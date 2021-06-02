@@ -1,8 +1,8 @@
 from typing import Iterable, List, Optional, Tuple
 
 import torch
-from data.parse_alchemy import colors, consistencyCheck, parse_utt_with_world, parse_world
-from utils import int_to_word, check_well_formedness
+from data.alchemy.parse_alchemy import colors
+from data.alchemy.utils import int_to_word
 import sys
 import torch.nn.functional as F
 from transformers import PreTrainedTokenizerBase

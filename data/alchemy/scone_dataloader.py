@@ -1,7 +1,8 @@
-from data.alchemy.utils import int_to_word
+from data.alchemy.utils import (
+    int_to_word, decide_translate, translate_states_to_nl, translate_states_to_nl,
+)
 from data.alchemy.parse_alchemy import (
     parse_utt_with_world, parse_world,
-    decide_translate, translate_states_to_nl, translate_states_to_nl,
 )
 from data.alchemy.parseScone import getBatchesWithInit
 from data.alchemy.alchemy_artificial_generator import execute

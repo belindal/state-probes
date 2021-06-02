@@ -115,3 +115,16 @@ class TWLocalizer(LocalizerBase):
         # turn to indices
         selected_indices, selection_mask = self.convert_batch_mask_to_indices(selected_index_mask)
         return selected_indices, selection_mask
+
+
+    def convert_batch_mask_to_indices(self, mask):
+        # mask: bsz x seqlen
+        # convert to indices where `True`
+        B, S = mask.size(0), mask.size(1)
+        indices = (mask * torch.arange(S).unsqueeze(0).to(mask.device)).masked_fill(~mask, S+1).sort().values
+        indices_mask = indices != S+1
+        # crop to max
+        longest_sequence = indices_mask.sum(-1).max()
+        indices = indices[:,:longest_sequence]
+        indices_mask = indices_mask[:,:longest_sequence]
+        return indices, indices_mask

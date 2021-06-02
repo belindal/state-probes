@@ -2,7 +2,7 @@
 
 from data.alchemy.alchemy_artificial_generator import execute
 from data.alchemy.utils import (
-    check_well_formedness, word_to_int, colors, d_colors as char_to_color, int_to_word,
+    check_well_formedness, word_to_int, colors, d_colors, int_to_word,
 )
 
 def find_nth_color(nth, color, objs):
@@ -123,86 +123,6 @@ def consistencyCheck(prior, gen):
     if new_world['objects'] != world['objects']:
         return True
     return False
-
-
-def translate_states_to_nl(state_inputs, domain, add_space=True):
-    """
-    If second-last beaker, adds ' ' before the sentence
-    """
-    if domain == "alchemy":
-        all_beakers = state_inputs.split(" ")
-
-        nl_states = []
-        for beaker_state in all_beakers:
-            beaker_number = int_to_word[int(beaker_state.split(":")[0])-1]
-            if '_' in beaker_state:
-                nl_states.append(f"the {beaker_number} beaker is empty")
-            elif len(set(beaker_state.split(":")[1])) == 1:  # only 1 color in beaker
-                color_in_beaker = char_to_color[beaker_state.split(":")[1][0]]
-                amount_in_beaker = len(beaker_state.split(":")[1])
-                nl_states.append(f"the {beaker_number} beaker has {amount_in_beaker} {color_in_beaker}")
-            else:
-                colors_to_amount = {}
-                beaker_items = beaker_state.split(":")[1]
-                for item in beaker_items:
-                    if char_to_color[item] not in colors_to_amount:
-                        colors_to_amount[char_to_color[item]] = 0
-                    colors_to_amount[char_to_color[item]] += 1
-                string = []
-                for color in colors_to_amount:
-                    string.append(f"{colors_to_amount[color]} {color}")
-                string = " and ".join(string)
-                string = f"the {beaker_number} beaker has {string}"
-                nl_states.append(string)
-
-        if len(nl_states) == 1:
-            # only 1 element--add space for non-first beakers
-            nl_states = f"{' ' if beaker_number != 'first' and add_space else ''}{nl_states[0]}"
-        else:
-            nl_states = ", ".join(nl_states)
-        return nl_states
-    else: raise NotImplementedError()
-
-
-def translate_nl_to_states(nl_inputs, domain):
-    if domain == "alchemy":
-        # non-well-formed
-        if not check_well_formedness(nl_inputs): return ""
-        all_beakers = nl_inputs.split(", ")
-        raw_states = []
-        for beaker_state in all_beakers:
-            if "is" in beaker_state: beaker_state = beaker_state.split(" is ")
-            elif "has" in beaker_state: beaker_state = beaker_state.split(" has ")
-            else: assert False
-            beaker_number = word_to_int[beaker_state[0].split("the ")[1].split(" beaker")[0]] + 1
-            beaker_contents = beaker_state[1]
-            if 'empty' in beaker_state:
-                raw_states.append(f"{beaker_number}:_")
-            elif "and" not in beaker_contents:  # only 1 color in beaker
-                beaker_contents = beaker_contents.split(' ')
-                amount = int(beaker_contents[0])
-                color = beaker_contents[1][0]
-                raw_states.append(f"{beaker_number}:{''.join([color for _ in range(amount)])}")
-            else:
-                string = ""
-                beaker_contents = beaker_contents.split(" and ")
-                for item in beaker_contents:
-                    item = item.split(" ")
-                    amount = int(item[0])
-                    color = item[1][0]
-                    for _ in range(amount): string += color
-                string = f"{beaker_number}:{string}"
-                raw_states.append(string)
-        raw_states = " ".join(raw_states)
-        return raw_states
-    else: raise NotImplementedError()
-
-
-def decide_translate(probe_target, state_targets_type, domain, add_space=True):
-    # probe_target: 'state', 'init_state', 'interm_states', 'single_beaker', 'text'
-    state_targets_type = state_targets_type.split('.')
-    if len(state_targets_type) > 1 and state_targets_type[-1] == 'NL': return translate_states_to_nl(probe_target, domain, add_space=add_space)
-    else: return probe_target
 
 
 if __name__=='__main__':

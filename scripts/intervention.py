@@ -6,37 +6,34 @@ from torch import nn
 import numpy as np
 import random
 
-from parseScone import loadData, getBatches, getBatchesWithInit
+from data.alchemy.parseScone import loadData, getBatches, getBatchesWithInit
 import os
 import json
 from tqdm import tqdm
 
 from data.alchemy.alchemy_artificial_generator import execute
-from data.alchemy.parse_alchemy import consistencyCheck, parse_world, parse_utt_with_world, word_to_int, colors
-from utils import (
-    check_val_consistency, batch, DEVICE, int_to_word,
-    ContrastiveClassifierHead, DumbStateEncoder, TransformerStateEncoder,
+from data.alchemy.parse_alchemy import consistencyCheck, parse_world, parse_utt_with_world
+from data.alchemy.utils import (
+    word_to_int, colors, int_to_word, translate_nl_to_states, translate_states_to_nl
 )
+from metrics.alchemy_metrics import check_val_consistency
 from data.alchemy.scone_dataloader import convert_to_transformer_batches
 from probe_models import (
     get_lang_model,
 )
-import Levenshtein
 import torch.nn.functional as F
-from utils import translate_nl_to_states, translate_states_to_nl
-
-import faiss
 
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--eval_batchsize', type=int, default=128)
 parser.add_argument('--arch', type=str, default='bart', choices=['t5', 'bart'])
 parser.add_argument('--encode_init_state', type=str, default='NL', choices=[False, 'raw', 'NL'])
+parser.add_argument('--device', type=str, default='cuda')
 parser.add_argument('--seed', type=int, default=45)
 parser.add_argument('--lm_save_path', type=str, default=None, help="load existing LM checkpoint (if any)")
 parser.add_argument('--probe_layer', type=int, default=-1, help="which layer of the model to probe")
 parser.add_argument('--overwrite_save', action='store_true', default=False)
-parser.add_argument('--create_type', type=str, choices=['drain_1', 'pour_1', 'drain_half'], help='what command(s) to append')
+parser.add_argument('--create_type', type=str, choices=['drain_1'], default='drain_1', help='what command(s) to append')
 args = parser.parse_args()
 
 EVAL_BATCHSIZE = args.eval_batchsize
@@ -45,7 +42,8 @@ probe_layer = args.probe_layer
 encode_init_state = args.encode_init_state
 lm_save_path = args.lm_save_path
 create_type = args.create_type
-fn = f"replace_states_outs/{args.lm_save_path.split('/')[-1].split('.')[0]}_append_both_{create_type}.jsonl"
+os.makedirs("intervention_outs", exist_ok=True)
+fn = f"intervention_outs/{args.lm_save_path.split('/')[-1].split('.')[0]}_append_both_{create_type}.jsonl"
 update_orig = True
 
 
@@ -59,11 +57,11 @@ random.seed(args.seed)
 replaced_inp_sentence = None
 
 # load (language) model
-base_lm, encoder, tokenizer = get_lang_model(arch, lm_save_path)
+base_lm, encoder, tokenizer = get_lang_model(arch, lm_save_path, device=args.device)
 
-def encode_input(inp_sentence=None, tokenized_sentence=None):
+def encode_input(inp_sentence=None, tokenized_sentence=None, device='cuda'):
     if tokenized_sentence is None:
-        inputs = tokenizer(inp_sentence, return_tensors='pt', padding=True, truncation=True).to(DEVICE)
+        inputs = tokenizer(inp_sentence, return_tensors='pt', padding=True, truncation=True).to(device)
     else:
         inputs = tokenized_sentence
     input_ids, attention_mask = inputs['input_ids'], inputs['attention_mask']
@@ -170,40 +168,15 @@ def create_new_sentence(next_utt, priorTxt, priorTxt_rawstate, orig_final_state_
     if create_type == "drain_1":
         new_next_utt = f"drain {target_beaker_amt} from the {int_to_word[target_beaker_pos]} beaker"
         target_beaker_pos = [target_beaker_pos]
-    elif create_type == "drain_half":
-        all_beaker_amts = [len(beaker) if beaker is not None else 0 for beaker in orig_final_state_raw['objects']]
-        pos_to_include = [pos for pos in range(len(all_beaker_amts)) if all_beaker_amts[pos] > 0]
-        # take approx half
-        pos_to_include = pos_to_include[:int(len(pos_to_include)/2)]
-        new_next_utt = ".\n".join([f"drain {all_beaker_amts[pos]} from the {int_to_word[pos]} beaker" for pos in pos_to_include])
-        target_beaker_pos = pos_to_include
-    elif create_type == "pour_1":
-        all_beaker_amts = [len(beaker) if beaker is not None else 0 for beaker in orig_final_state_raw['objects']]
-        beaker_from = target_beaker_pos
-        # find beaker w/ smallest amount (excluding empty) and target beaker
-        beaker_amts_list = [
-            len(orig_final_state_raw['objects'][beaker])
-            if orig_final_state_raw['objects'][beaker] is not None and beaker != beaker_from else 1000
-            for beaker in range(7)]
-        beaker_to_amt, beaker_to = np.array(beaker_amts_list).min(), np.array(beaker_amts_list).argmin()
-        assert beaker_to_amt <= 4 and beaker_to != beaker_from and orig_final_state_raw['objects'][beaker_to] is not None  # lowest beaker is not full
-        if target_beaker_amt + beaker_to_amt > 4:
-            amt_to_drain = beaker_to_amt + target_beaker_amt - 4
-            beaker_to_drain = beaker_to if amt_to_drain <= beaker_to_amt else beaker_from
-            # print(f"so rare case of additional draining {amt_to_drain} from target happening...")
-            new_next_utt_init = f"drain {amt_to_drain} from the {int_to_word[beaker_to_drain]} beaker.\n"
-        else: new_next_utt_init = ""
-        # create new sentence by adding `pour`
-        new_next_utt = f"{new_next_utt_init}pour the {int_to_word[beaker_from]} beaker to the {int_to_word[beaker_to]} beaker"
-        target_beaker_pos = [beaker_from, beaker_to]
     else: raise NotImplementedError()
 
     new_sentence, new_sentence_rawstate, new_final_state_raw = priorTxt, priorTxt_rawstate, orig_final_state_raw
-    for nnu in new_next_utt.split(".\n"):
+    split_token = ".\n" if ".\n" in priorTxt else ". "
+    for nnu in new_next_utt.split(split_token):
         assert consistencyCheck(new_sentence_rawstate, nnu)
         # create new sentence by adding `drain` or `pour`
-        new_sentence = f"{new_sentence}.\n{nnu}"
-        new_sentence_rawstate = f"{new_sentence_rawstate}.\n{nnu}"
+        new_sentence = f"{new_sentence}{split_token}{nnu}"
+        new_sentence_rawstate = f"{new_sentence_rawstate}{split_token}{nnu}"
         # update world according to new sentence
         new_action, new_args = parse_utt_with_world(nnu, new_final_state_raw)
         new_final_state_raw = execute(new_final_state_raw, new_action, new_args)
@@ -229,51 +202,19 @@ def create_orig_sentence(new_next_utt, new_sentence, new_sentence_rawstate, new_
     if create_type == "drain_1":
         assert target_beaker_amt == len(new_final_state_raw['objects'][orig_target_beaker_pos])
         orig_next_utt = f"drain {target_beaker_amt} from the {int_to_word[orig_target_beaker_pos]} beaker"
-    elif create_type == "drain_half":
-        new_sentence_utt = new_sentence.replace(priorTxt + ".\n", "")
-        new_all_beaker_amts = [len(beaker) if beaker is not None else 0 for beaker in new_final_state_raw['objects']]
-        pos_to_include = [pos for pos in range(len(new_all_beaker_amts)) if new_all_beaker_amts[pos] > 0]
-        orig_next_utt = ".\n".join([f"drain {new_all_beaker_amts[pos]} from the {int_to_word[pos]} beaker" for pos in pos_to_include])
-        target_beaker_pos = pos_to_include
-    elif create_type == "pour_1":
-        all_beaker_amts = [len(beaker) if beaker is not None else 0 for beaker in orig_final_state_raw['objects']]
-        new_sentence_utt = new_sentence.replace(priorTxt + ".\n", "")
-        init_utt = "" if len(new_sentence_utt.split('.\n')) == 1 else new_sentence_utt.split('.\n')[0]
-        new_sentence_utt = new_sentence_utt.split('.\n')[-1]
-        if len(init_utt) == 0: init_utt = ""
-        else: init_utt += ".\n"
-        new_sentence_utt = new_sentence_utt.split("pour the ")[1][:-len(" beaker")]
-        beaker_from, beaker_to = new_sentence_utt.split(" beaker to the ")[0], new_sentence_utt.split(" beaker to the ")[1]
-        beaker_from, beaker_to = word_to_int[beaker_from], word_to_int[beaker_to]
-        # apparently not always mix...
-        # swap the beakers from the utterance in `new_sentence`
-        orig_next_utt = f"{init_utt}pour the {int_to_word[beaker_to]} beaker to the {int_to_word[beaker_from]} beaker"
     else: raise NotImplementedError()
 
     orig_sentence, orig_sentence_rawstate = priorTxt, priorTxt_rawstate
-    for onu in orig_next_utt.split(".\n"):
+    split_token = ".\n" if ".\n" in priorTxt else ". "
+    for onu in orig_next_utt.split(split_token):
         assert consistencyCheck(orig_sentence_rawstate, onu)
         # create next sentence by adding `drain` or `pour`
-        orig_sentence = f"{orig_sentence}.\n{onu}"
-        orig_sentence_rawstate = f"{orig_sentence_rawstate}.\n{onu}"
+        orig_sentence = f"{orig_sentence}{split_token}{onu}"
+        orig_sentence_rawstate = f"{orig_sentence_rawstate}{split_token}{onu}"
         # update world according to next sentence
         next_action, next_args = parse_utt_with_world(onu, orig_final_state_raw)
         orig_final_state_raw = execute(orig_final_state_raw, next_action, next_args)
     return orig_sentence, orig_sentence_rawstate, orig_final_state_raw
-
-
-def get_kl_table(orig_sentence_log_likelihood, mix_sentence_log_likelihood, new_sentence_log_likelihood):
-    kl_divergences = [[0 for _ in range(3)] for _ in range(3)]
-    kl_divergences[0][0] = (orig_sentence_log_likelihood.exp() * (orig_sentence_log_likelihood - orig_sentence_log_likelihood)).sum().item()
-    kl_divergences[0][1] = (orig_sentence_log_likelihood.exp() * (orig_sentence_log_likelihood - mix_sentence_log_likelihood)).sum().item()
-    kl_divergences[0][2] = (orig_sentence_log_likelihood.exp() * (orig_sentence_log_likelihood - new_sentence_log_likelihood)).sum().item()
-    kl_divergences[1][0] = (mix_sentence_log_likelihood.exp() * (mix_sentence_log_likelihood - orig_sentence_log_likelihood)).sum().item()
-    kl_divergences[1][1] = (mix_sentence_log_likelihood.exp() * (mix_sentence_log_likelihood - mix_sentence_log_likelihood)).sum().item()
-    kl_divergences[1][2] = (mix_sentence_log_likelihood.exp() * (mix_sentence_log_likelihood - new_sentence_log_likelihood)).sum().item()
-    kl_divergences[2][0] = (new_sentence_log_likelihood.exp() * (new_sentence_log_likelihood - orig_sentence_log_likelihood)).sum().item()
-    kl_divergences[2][1] = (new_sentence_log_likelihood.exp() * (new_sentence_log_likelihood - mix_sentence_log_likelihood)).sum().item()
-    kl_divergences[2][2] = (new_sentence_log_likelihood.exp() * (new_sentence_log_likelihood - new_sentence_log_likelihood)).sum().item()
-    return kl_divergences
 
 
 # load data
@@ -282,14 +223,11 @@ dataset, lang_v, state_v = loadData(split="train", kind="alchemy", synthetic=Tru
 dev_dataset, lang_v_dev, state_v_dev = loadData(split="dev", kind="alchemy", synthetic=True)
 best_val_loss = 10**10
 best_epoch = -1
-all_train_states = [" ".join(state) for _, _, state in [x for d in dataset for x in d.all_pairs()]]
-all_dev_states = [" ".join(state) for _, _, state in [x for d in dev_dataset for x in d.all_pairs()]]
-random.shuffle(all_dev_states)
 #dev loss
 base_lm.eval()
 
 kl_divergences_all = []
-print(fn)
+print("Output file: " + fn)
 if args.overwrite_save or not os.path.exists(fn):
     existing_result_ids = {}
 else:
@@ -298,14 +236,12 @@ else:
     existing_result_ids = {line['id']: line for line in existing_lines}
 wf = open(fn, "w")
 all_results = []
-for j, (inputs, lang_tgts, probe_outs, raw_state_targets, init_states) in enumerate(tqdm(convert_to_transformer_batches(
+tot_num_batches = int(len(dev_dataset) / EVAL_BATCHSIZE)
+for j, (inputs, lang_tgts, probe_outs, raw_state_targets, init_states) in enumerate(convert_to_transformer_batches(
     dev_dataset, tokenizer, EVAL_BATCHSIZE, include_init_state=encode_init_state, domain="alchemy", device=args.device
-))):
-    if create_type == "drain_half":
-        # only previously had 1 command
-        if tokenizer.decode(inputs['input_ids'][-1], skip_special_tokens=True).count('.\n') > 0:
-            continue
-    encoder_outputs, input_ids, attention_mask = encode_input(tokenized_sentence=inputs)
+)):
+    print(f"BATCH {j}/{tot_num_batches}")
+    encoder_outputs, input_ids, attention_mask = encode_input(tokenized_sentence=inputs, device=args.device)
     hidden_reps_mask = attention_mask.clone()
     orig_output = base_lm.generate(input_ids=input_ids, decoder_start_token_id=base_lm.config.pad_token_id, max_length=128, no_repeat_ngram_size=0)
 
@@ -381,7 +317,6 @@ num_new_consistent = 0
 num_mix_consistent_if_new_consistent = 0
 num_new_and_mix_same = 0
 num_mix_consistent_orig_world = 0
-
 num_consistent_w_orig_and_new = [0,0,0]
 
 num_total = 0

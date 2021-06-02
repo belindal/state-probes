@@ -11,7 +11,6 @@ from transformers import BartTokenizerFast, T5TokenizerFast
 from transformers import BartForConditionalGeneration, T5ForConditionalGeneration
 from transformers import AdamW
 
-import pdb
 import argparse
 import os
 import glob
@@ -22,7 +21,6 @@ import logging
 import random
 
 from localizer.tw_localizer import TWLocalizer
-from utils import DEVICE
 from metrics.tw_metrics import get_em, get_confusion_matrix
 from data.textworld.parse_tw import (
     translate_inv_items_to_str, translate_inv_str_to_items,
@@ -49,10 +47,9 @@ parser.add_argument('--override_num_layers', type=int, default=None)
 parser.add_argument('--batchsize', type=int, default=16)
 parser.add_argument('--eval_batchsize', type=int, default=128)
 parser.add_argument('--data', type=str, required=True)
-parser.add_argument('--dropout', type=float, default=0.1)
+parser.add_argument('--device', type=str, default='cuda')
 parser.add_argument('--epochs', type=int, default=20)
 parser.add_argument('--eval_only', default=False, action='store_true')
-parser.add_argument('--eval_sample', default=1.0, type=float, help='take proportion of eval samples')  # 0.08 for belief_facts_pair
 parser.add_argument('--gamefile', type=str, required=True)
 parser.add_argument('--lr', type=float, default=1e-5)
 parser.add_argument('--no_pretrain', default=False, action='store_true')
@@ -73,7 +70,6 @@ parser.add_argument('--probe_target', type=str, default='final.belief_facts', ch
     f'{init_final}.full_facts', f'{init_final}.full_belief_facts', f'{init_final}.belief_facts',
     f'{init_final}.belief_facts_single', f'{init_final}.belief_facts_pair',
     f'{init_final}.full_belief_facts_single', f'{init_final}.full_belief_facts_pair',
-    f'{init_final}.curr_state_belief_facts_single', f'{init_final}.curr_state_belief_facts_pair',
     f'{init_final}.belief_facts_single.control', f'{init_final}.full_belief_facts_single.control', f'{init_final}.belief_facts_single.control_with_rooms', f'{init_final}.full_belief_facts_single.control_with_rooms',
     f'{init_final}.belief_facts_pair.control', f'{init_final}.full_belief_facts_pair.control', f'{init_final}.belief_facts_pair.control_with_rooms', f'{init_final}.full_belief_facts_pair.control_with_rooms',
 ] for init_final in ['init', 'final']])))
@@ -82,12 +78,7 @@ parser.add_argument('--localizer_type', type=str, default='all',
     help="which encoded tokens of the input to probe."
     "Set to `all`, `belief_facts_{single|pair}_{all|first|last}`")
 parser.add_argument('--seed', type=int, default=42)
-parser.add_argument('--state_save_path', type=str, default=None)
-# parser.add_argument('--use_mapping_control_domain', default=False, action='store_true', help='use domain that includes both mapping mentions')
-parser.add_argument('--use_pt_state', default=False, action='store_true', help='use frozen pretrained model for state encoder')
-parser.add_argument('--do_state_em', action='store_true', default=False)
-parser.add_argument('--max_gt_grounded_states', type=int, default=-1, help="if doing state em, max amount of gold state-supervision")
-parser.add_argument('--ents_to_states_file', type=str, default=None, help='File path to precomputed state vectors')
+parser.add_argument('--ents_to_states_file', type=str, default=None, help='Filepath to precomputed state vectors')
 args = parser.parse_args()
 
 arch = args.arch
@@ -108,8 +99,6 @@ probe_agg_method = args.probe_agg_method
 probe_attn_dim = args.probe_attn_dim
 probe_save_path = args.probe_save_path
 train_data_size = args.train_data_size
-if args.max_gt_grounded_states == -1: max_gt_grounded_states = float("inf")
-else: max_gt_grounded_states = args.max_gt_grounded_states
 game_kb = None
 inform7_game = None
 # NOTE: inexact if grammars between worlds are different (not the case, at least for simple domain)
@@ -140,9 +129,7 @@ def eval_model(args, model, dev_dataloader, tokenizer, eval_batchsize, precomput
         cms = None
         saved_preds = []
         save_dict = []
-        eval_step = int(1 / args.eval_sample)
         for j, (inputs, lang_tgts, init_state, tgt_state, game_ids, entity_sets) in enumerate(tqdm(dev_dataloader)):
-            if j % eval_step != 0: continue
             if inputs is None: continue
             bs = len(game_ids)
             model_outs = model(inputs['input_ids'], inputs['attention_mask'], offset_mapping=inputs['offset_mapping'], probe_outs=tgt_state, localizer_key=entity_sets['mentions'])
@@ -198,10 +185,7 @@ def eval_model(args, model, dev_dataloader, tokenizer, eval_batchsize, precomput
                 if output_json_fn:
                     prev_context = dev_dataset[j*eval_batchsize+i]['contexts']
                     if not args.control_input:
-                        try:
-                            assert tokenizer.decode(inputs['input_ids'][i], skip_special_tokens=True).strip() == prev_context.strip()
-                        except:
-                            import pdb; pdb.set_trace()
+                        assert tokenizer.decode(inputs['input_ids'][i], skip_special_tokens=True).strip() == prev_context.strip()
                     saved_preds.append({
                         'prev_context': prev_context, 'gt_state': gt_state, 'gen_state': gen_state, 'game_id': game_ids[i],
                     })
@@ -240,28 +224,35 @@ if not probe_save_path:
 os.makedirs(os.path.split(probe_save_path)[0], exist_ok=True)
 
 # load (language) model
-model, encoder, tokenizer = get_lang_model(arch, lm_save_path, pretrained, local_files_only=args.local_files_only, n_layers=args.override_num_layers)
+model, encoder, tokenizer = get_lang_model(arch, lm_save_path, pretrained, local_files_only=args.local_files_only, n_layers=args.override_num_layers, device=args.device)
 
 # create/load world state encoder
 # (w/ same encoder as LM)
 state_model = None
 if encode_tgt_state:
-    state_model = get_state_encoder(encode_tgt_state.split('.')[-1], encoder, config=model.config, pretrained=pretrained, freeze_params=True, local_files_only=args.local_files_only, n_layers=args.override_num_layers)
+    state_model = get_state_encoder(
+        encode_tgt_state.split('.')[-1], encoder, config=model.config, pretrained=pretrained,
+        freeze_params=True, local_files_only=args.local_files_only, n_layers=args.override_num_layers, device=args.device,
+    )
 
 # create probe model
-probe_model = get_probe_model(probe_type, probe_agg_method, probe_attn_dim, arch, model, probe_save_path, args, local_files_only=args.local_files_only)
+probe_model = get_probe_model(probe_type, probe_agg_method, probe_attn_dim, arch, model, probe_save_path, args.tgt_agg_method, encode_tgt_state=args.encode_tgt_state, local_files_only=args.local_files_only, device=args.device)
 
-localizer = TWLocalizer(getattr(probe_model, 'agg_layer', None), args.probe_agg_method, args.probe_attn_dim, args.localizer_type, None, tokenizer, DEVICE)
-state_localizer = TWLocalizer(getattr(probe_model, 'target_agg_layer', None), args.tgt_agg_method, args.probe_attn_dim, 'all', None, tokenizer, DEVICE)
+localizer = TWLocalizer(getattr(probe_model, 'agg_layer', None), args.probe_agg_method, args.probe_attn_dim, args.localizer_type, None, tokenizer, args.device)
+state_localizer = TWLocalizer(getattr(probe_model, 'target_agg_layer', None), args.tgt_agg_method, args.probe_attn_dim, 'all', None, tokenizer, args.device)
 if args.encode_tgt_state:
     assert args.probe_type != 'decoder'
     full_joint_model = ProbeLinearModel(
-        vars(args), getattr(probe_model, 'config', getattr(model, 'config', None)), model, state_model, probe_model, localizer, state_localizer,
+        args.arch, getattr(probe_model, 'config', getattr(model, 'config', None)),
+        model, state_model, probe_model, args.probe_layer, args.probe_type,
+        localizer, state_localizer,
     )
 else:
     assert args.probe_type == 'decoder'
     full_joint_model = ProbeConditionalGenerationModel(
-        vars(args), getattr(probe_model, 'config', getattr(model, 'config', None)), model, state_model, probe_model, localizer, state_localizer,
+        args.arch, getattr(probe_model, 'config', getattr(model, 'config', None)),
+        model, state_model, probe_model, args.probe_layer, args.probe_type,
+        localizer, state_localizer,
     )
 optimizer = AdamW([p for p in full_joint_model.parameters() if p.requires_grad], lr=args.lr)
 print("Loaded model")
@@ -281,8 +272,6 @@ else:
 
 state_key = probe_target[1].replace('_single', '').replace('_pair', '')
 tgt_state_key = probe_target[0]+'_states'
-dataset_class = TWEntitySetDataset
-dataloader_class = TWEntitySetDataLoader
 possible_pairs = None
 if probe_target[1].endswith('_pair'):
     ent_set_size = 2
@@ -300,19 +289,19 @@ assert precomputed_negs is not None
 
 control = probe_target[2] if len(probe_target)>2 else False
 # load data
-dev_dataset = dataset_class(
+dev_dataset = TWEntitySetDataset(
     args.data, tokenizer, 'dev', max_seq_len=max_seq_len, ent_set_size=ent_set_size, control=control,
     gamefile=args.gamefile, state_key=state_key, tgt_state_key=tgt_state_key, max_data_size=max_data_size[0],
     inform7_game=inform7_game, possible_pairs=possible_pairs, precomputed_negs=precomputed_negs,
 )
-dataset = dataset_class(
+dataset = TWEntitySetDataset(
     args.data, tokenizer, 'train', max_seq_len=max_seq_len, ent_set_size=ent_set_size, control=control,
     gamefile=args.gamefile, state_key=state_key, tgt_state_key=tgt_state_key, max_data_size=max_data_size[1],
     inform7_game=inform7_game, possible_pairs=possible_pairs, precomputed_negs=precomputed_negs,
 )
 print(f"Loaded data: {len(dataset)} train examples, {len(dev_dataset)} dev examples")
-train_dataloader = dataloader_class(dataset, tokenizer, batchsize, control_input)
-dev_dataloader = dataloader_class(dev_dataset, tokenizer, eval_batchsize, control_input)
+train_dataloader = TWEntitySetDataLoader(dataset, tokenizer, batchsize, control_input, device=args.device)
+dev_dataloader = TWEntitySetDataLoader(dev_dataset, tokenizer, eval_batchsize, control_input, device=args.device)
 print("Created batches")
 
 # get all pairs of entities to query

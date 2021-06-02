@@ -232,7 +232,6 @@ def pick_action(world):
         except Exception as err:
             # should not happen
             print(f'Error {err}: ' + str([''.join([bentry[0] for bentry in beaker]) if beaker is not None else '' for beaker in world['objects']]) + ' ' + action)
-            import pdb; pdb.set_trace()
             raise Exception
         break
     assert(args is not None)

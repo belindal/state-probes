@@ -11,7 +11,6 @@ from transformers import BartForConditionalGeneration, T5ForConditionalGeneratio
 from transformers import AdamW
 from transformers.models.bart.modeling_bart import BartEncoder
 
-import pdb
 import argparse
 import os
 from tqdm import tqdm
@@ -22,11 +21,11 @@ import random
 import glob
 
 from metrics.tw_metrics import consistencyCheck
-from data.tw_dataloader import TWDataset, TWFullDataLoader, split_data_by_final_state
+from data.textworld.tw_dataloader import TWDataset, TWFullDataLoader
 
 
 def eval_checkpoint(
-    args, i, model, dev_dataloader, save_dir=None, best_val_loss=float("inf"),
+    args, i, model, dev_dataloader, save_path=None, best_val_loss=float("inf"),
 ):
     model.eval()
     stdout_message = [f"EPOCH {i}"]
@@ -47,15 +46,14 @@ def eval_checkpoint(
     print("; ".join(stdout_message))
 
     # save checkpoints
-    if save_dir is not None:
-        new_best_loss = avg_val_loss <= best_val_loss
+    new_best_loss = avg_val_loss <= best_val_loss
+    if save_path is not None:
         if new_best_loss:
             print("NEW BEST MODEL")
             model.epoch = i
-            torch.save(model.state_dict(),savePath)
+            torch.save(model.state_dict(), save_path)
         else:
-            print(f"model val  loss went up")
-            new_best_loss = False
+            print(f"model val loss went up")
     return avg_val_loss, new_best_loss
 
 
@@ -69,10 +67,10 @@ parser.add_argument('--epochs', type=int, default=20)
 parser.add_argument('--eval_only', action='store_true', default=False)
 parser.add_argument('--gamefile', type=str, required=False)
 parser.add_argument('--lr', type=float, default=1e-5)
-parser.add_argument('--max_seq_len', type=int, default=1024)
+parser.add_argument('--max_seq_len', type=int, default=512)
 parser.add_argument('--num_samples', type=int, default=1)
 parser.add_argument('--no_pretrain', action='store_true', default=False)
-parser.add_argument('--save_dir', type=str, default=None)
+parser.add_argument('--save_path', type=str, default=None)
 parser.add_argument('--seed', type=int, default=42)
 parser.add_argument('--train_data_size', type=int, default=4000)
 parser.add_argument('--patience', type=int, default=10)
@@ -80,7 +78,6 @@ parser.add_argument('--local_files_only', action='store_true', default=False, he
 args = parser.parse_args()
 
 arch = args.arch
-save_dir = args.save_dir
 pretrain = not args.no_pretrain
 batchsize = args.batchsize
 eval_batchsize = args.eval_batchsize
@@ -115,15 +112,15 @@ else:
 
 # load or create model(s)
 load_model = False
-if not args.save_dir:
-    save_dir = os.path.join(
+save_path = args.save_path
+if not save_path:
+    os.makedirs("twModels", exist_ok=True)
+    save_path = os.path.join(
         f"twModels",
-        f"{'pre_' if pretrain else 'nonpre_'}{arch}_lr{args.lr}_{args.data.split('/')[-1]}{'_seed'+str(args.seed)}",
+        f"{'pre_' if pretrain else 'nonpre_'}{arch}_lr{args.lr}_{args.data.split('/')[-1]}{'_seed'+str(args.seed)}.p",
     )
-if not os.path.exists(save_dir): os.makedirs(save_dir)
-savePath = os.path.join(save_dir, f"best.p")
-if os.path.exists(savePath):
-    model_dict = torch.load(savePath)
+if os.path.exists(save_path):
+    model_dict = torch.load(save_path)
     load_model = True
     print("Loading LM model")
 if not load_model: print("Creating LM model")
@@ -134,7 +131,7 @@ else:
     model = model_class(config)
 if load_model:
     model.load_state_dict(model_dict)
-print(f"    model path: {savePath}")
+print(f"    model path: {save_path}")
 config = model.config
 
 model.to(args.device)
@@ -150,28 +147,23 @@ dev_dataset = TWDataset(
 dataset = TWDataset(
     args.data, tokenizer, 'train', max_seq_len, max_data_size=4000, inform7_game=inform7_game,
 )
-train_dataloader = TWFullDataLoader(dataset, tokenizer, args.gamefile, batchsize)
-dev_dataloader = TWFullDataLoader(dev_dataset, tokenizer, args.gamefile, eval_batchsize)
+train_dataloader = TWFullDataLoader(dataset, args.gamefile, tokenizer, batchsize, device=args.device)
+dev_dataloader = TWFullDataLoader(dev_dataset, args.gamefile, tokenizer, eval_batchsize, device=args.device)
 print(f"Loaded data: {len(dataset)} train examples, {len(dev_dataset)} dev examples")
 
 output_json_fn = None
 if args.eval_only:
-    output_json_fn = f"{savePath[:-2]+f'{args.num_samples}_samples.jsonl'}"
+    output_json_fn = f"{save_path[:-2]+f'{args.num_samples}_samples.jsonl'}"
     print(f"Saving predictions to {output_json_fn}")
 
 # Initial eval
 print("Initial eval")
 avg_val_loss = 0
-n_val = None
-results = eval_checkpoint(args, -1, model, dev_dataloader)
-n_val = results[0]
-avg_val_loss += results[1]
-print(f"CONSISTENCY: loss - {results[1]}")
+results = eval_checkpoint(args, "INIT", model, dev_dataloader)
+avg_val_loss += results[0]
+print(f"CONSISTENCY: loss - {results[0]}")
 best_loss_epoch = -1
-if force_overwrite_checkpoint:
-    best_val_loss = float("inf")
-else:
-    best_val_loss = avg_val_loss
+best_val_loss = avg_val_loss
 
 if args.eval_only:
     exit()
@@ -199,7 +191,7 @@ for i in range(args.epochs):
         if j%100 == 0:
             print(f"epoch {i}, batch {j}, loss: {lang_loss.item()}", flush=True)
     avg_val_loss, new_best_loss = eval_checkpoint(
-        args, i, model, dev_dataloader, save_dir, best_val_loss,
+        args, i, model, dev_dataloader, save_path=save_path, best_val_loss=best_val_loss,
     )
     if new_best_loss:
         best_val_loss = avg_val_loss
