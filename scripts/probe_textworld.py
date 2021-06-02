@@ -216,7 +216,12 @@ def eval_model(args, model, dev_dataloader, tokenizer, eval_batchsize, precomput
 # create save dir/path
 save_state = True 
 if lm_save_path:
-    output_dir = os.path.join(os.path.basename(lm_save_path.split('.')[0]), f"{'enctgt_' if encode_tgt_state else ''}{probe_type}" + \
+    save_dir = os.path.basename(lm_save_path.split('.')[0])
+elif pretrained:
+    save_dir = f"noft_{arch}"
+else:
+    save_dir = f"nopre_noft_{arch}"
+output_dir = os.path.join(save_dir, f"{'enctgt_' if encode_tgt_state else ''}{probe_type}" + \
     f"_{localizer_type + (f'.control_inp' if control_input else '')}_{probe_agg_method}{probe_attn_dim if probe_agg_method and probe_agg_method.endswith('_attn') else ''}{tgt_agg_method if encode_tgt_state else ''}" + \
     f"_{args.probe_target}{'_'+str(train_data_size)}_seed{args.seed}")
 if not probe_save_path:

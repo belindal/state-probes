@@ -102,8 +102,8 @@ python scripts/get_all_tw_facts.py \
     --data tw_data/simple_traces --gamefile tw_data/simple_games \
     --state_model_arch [bart|t5] \
     --probe_target belief_facts_pair \
-    --state_model_path <path_to_lm_checkpoint> \
-    --out_file [None|pretrain|<path_to_prop_encodings>]
+    --state_model_path [None|pretrain|<path_to_lm_checkpoint>] \
+    --out_file <path_to_prop_encodings>
 ```
 
 Run the probe with
@@ -125,6 +125,6 @@ Change `--probe_target` to `init.full_belief_facts_pair` to decode initial state
 
 For remap experiments, change `--probe_target` to `final.full_belief_facts_pair.control_with_rooms`.
 
-For decoding from just one side of propositions, replace any instance of `belief_facts_pair` with `belief_facts_single` and rerun both commands (first get the full proposition encodings, then run the probe).
+For decoding from just one side of propositions, replace any instance of `belief_facts_pair` (in `--probe_target` and `--localizer_type`) with `belief_facts_single` and rerun both commands (first get the full proposition encodings, then run the probe).
 
 Saves probe checkpoints under `probe_models_textworld/*`.
