@@ -75,7 +75,7 @@ python scripts/probe_alchemy.py \
     --encode_tgt_state NL.[bart|t5] --tgt_agg_method avg \
     --batchsize 128 --eval_batchsize 1024 --lr 1e-4
 ```
-For evaluation, add `--eval_only --probe_save_path <path_to_probe_checkpoint>`.
+For evaluation, add `--eval_only --probe_save_path <path_to_probe_checkpoint>`. This will save model predictions to a `.jsonl` file under the same directory as the probe checkpoint.
 
 Add `--control_input` for No LM experiment.
 
@@ -117,7 +117,7 @@ python scripts/probe_textworld.py \
     --ents_to_states_file <path_to_prop_encodings> \
     --eval_batchsize 256 --batchsize 32
 ```
-For evaluation, add `--eval_only --probe_save_path <path_to_probe_checkpoint>`.
+For evaluation, add `--eval_only --probe_save_path <path_to_probe_checkpoint>`. This will save model predictions to a `.jsonl` file under the same directory as the probe checkpoint.
 
 Add `--control_input` for No LM experiment.
 
@@ -128,3 +128,14 @@ For remap experiments, change `--probe_target` to `final.full_belief_facts_pair.
 For decoding from just one side of propositions, replace any instance of `belief_facts_pair` (in `--probe_target` and `--localizer_type`) with `belief_facts_single` and rerun both commands (first get the full proposition encodings, then run the probe).
 
 Saves probe checkpoints under `probe_models_textworld/*`.
+
+
+## Print Metrics
+Print full metrics (state EM, entity EM, subdivided by relations vs. propositions, etc.) using `scripts/print_metrics.py`.
+```bash
+python scripts/print_metrics.py \
+    --arch [bart|t5] --domain [alchemy|textworld] \
+    --pred_files <path_to_model_predictions_1>,<path_to_model_predictions_2>,<path_to_model_predictions_3>,... \
+    [--use_remap_domain --remap_fn <path_to_remap_model_predictions>] \
+    [--single_side_probe]
+```

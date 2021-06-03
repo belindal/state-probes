@@ -116,7 +116,7 @@ if lm_save_path:
     output_dir = f"{f'encoded_{encode_tgt_state}' if encode_tgt_state else ''}{probe_type}" + \
     f"_{localizer_type}{'.control_inp' if args.control_input else ''}_" + \
     f"{probe_agg_method}{probe_attn_dim if probe_agg_method and probe_agg_method.endswith('_attn') else ''}{probe_max_tokens if probe_max_tokens else ''}{tgt_agg_method if encode_tgt_state else ''}" + \
-    f"_{lm_save_path.split('.')[0]}_l{probe_layer}{'_' + probe_target if probe_target != 'state' else ''}_{'real' if args.nonsynthetic else 'synth'}"
+    f"_{lm_save_path.split('.')[0].split('/')[-1]}_l{probe_layer}{'_' + probe_target if probe_target != 'state' else ''}_{'real' if args.nonsynthetic else 'synth'}"
 else:
     output_dir = f"{'nopt_' if not pretrained else ''}noft_{f'encoded_{encode_tgt_state}' if encode_tgt_state else ''}{probe_type}" + \
     f"_{localizer_type}{'.control_inp' if args.control_input else ''}_" + \
