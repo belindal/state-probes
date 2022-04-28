@@ -155,24 +155,13 @@ if args.domain == 'alchemy':
 if args.domain == 'textworld':
     data_type = 'simple'
     local_files_only = True
-    # [
-    #     f"probe_models_textworld/{'' if pretrain else 'nopre_'}{'' if finetune else 'noft_'}{arch}_same_state_lr1e-05_training_traces_tw-{data_type}_4000_seed42/enctgt_3linear_classify_actions.belief_facts_pair_{pos}{'.control_inp' if control_input  else ''}_avgavg_final.full_full_belief_facts_pair_4000_seed42.jsonl"
-    #     for pretrain in [True, False] for finetune in [True, False] for pos in ['all', 'first', 'last'] for control_input in [False, True]
-    # ]
-    # init
-    # eval_fns = [f"probe_models_textworld/{arch}_same_state_lr1e-05_training_traces_tw-{data_type}_4000_seed42/enctgt_3linear_classify_actions.belief_facts_pair_{pos}.avgavg_init.full_belief_facts_pair_4000_seed42.jsonl"]
-    # single vs. pair
-    # eval_fns = [f"probe_models_textworld/{arch}_same_state_lr1e-05_training_traces_tw-{data_type}_4000_seed42/enctgt_3linear_classify_actions.belief_facts_pair_{pos}_avgavg_final.full_belief_facts_pair_4000_seed42.jsonl"]
-    # single_fn = f"probe_models_textworld/{arch}_same_state_lr1e-05_training_traces_tw-simple_4000_seed42/enctgt_3linear_classify_actions.belief_facts_single_all_avgavg_final.belief_facts_single_4000_seed42.jsonl"
-    # pair_domain = f"probe_models_textworld/{arch}_same_state_lr1e-05_training_traces_tw-simple_4000_seed42/enctgt_3linear_classify_actions.belief_facts_single_all_avgavg_final.full_belief_facts_single_4000_seed42_pair_domain.jsonl"
-    # remap_fn = f"probe_models_textworld/{arch}_same_state_lr1e-05_training_traces_tw-{data_type}_4000_seed42/enctgt_3linear_classify_actions.belief_facts_pair_all_avgavg_final.full_belief_facts_pair.control_with_rooms_4000_seed42.jsonl"
     split_rel_prop = True
 
     if args.single_side_probe:
         # eval_fns = [single_fn]
         entities = ENTITIES_SIMPLE + ROOMS_SIMPLE
         all_entities_list = list(itertools.combinations([None, *entities], 2))
-        possible_pairs = load_possible_pairs(pair_out_file='../state-probes-TW/tw_games/training_traces_tw-simple/entity_pairs.json')
+        possible_pairs = load_possible_pairs(pair_out_file='tw_data/training_traces_tw-simple/entity_pairs.json')
 
     print(eval_fns)
     eval_fns = [eval_fn for eval_fn in eval_fns if os.path.exists(eval_fn)]
@@ -198,7 +187,7 @@ if args.domain == 'textworld':
             tokenizer = T5TokenizerFast.from_pretrained('t5-base', local_files_only=local_files_only)
         else:
             raise NotImplementedError()
-        gamefile = f'../state-probes-TW/tw_games/training_tw-{data_type}'
+        gamefile = f'tw_data/{data_type}_games'
         for fn in glob.glob(os.path.join(gamefile, 'train/*.ulx')):
             env = textworld.start(fn)
             game_state = env.reset()
@@ -207,7 +196,7 @@ if args.domain == 'textworld':
             break
 
         # get gts
-        dataset = TWDataset(f'../state-probes-TW/tw_games/training_traces_tw-{data_type}', tokenizer, 'dev', max_seq_len=512, max_data_size=500)
+        dataset = TWDataset(f'tw_data/{data_type}_traces', tokenizer, 'dev', max_seq_len=512, max_data_size=500)
         ctxt_to_gt_state = {}
         for entry in dataset:
             if not control_input:
