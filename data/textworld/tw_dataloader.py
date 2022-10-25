@@ -397,11 +397,6 @@ class TWFullDataLoader(DataLoader):
         else:
             self.state_keys = [key[1].replace('_single', '').replace('_pair', '') for key in state_keys_to_get]
             self.tgt_state_keys = [key[0]+'_state' for key in state_keys_to_get]
-            if len(state_keys_to_get) == 1:
-                get_pair = state_keys_to_get[0][1].endswith('_pair')
-                get_single = state_keys_to_get[0][1].endswith('_single')
-                state_key = state_keys[0]
-                self.tgt_state_key = tgt_state_keys[0]
         self.states = states
         self.nnegs = nnegs
         self.npos = npos
