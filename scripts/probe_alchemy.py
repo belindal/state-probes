@@ -175,7 +175,7 @@ if encode_tgt_state:
     if state_model: state_model.eval()
     print("Getting vectors for all possible beaker states")
     with torch.no_grad():
-        if 'single_beaker_init' or 'single_beaker_final' in args.probe_target:
+        if 'single_beaker_init' in args.probe_target or 'single_beaker_final' in args.probe_target:
             all_beaker_states, beaker_state_to_idx = gen_all_beaker_states("alchemy", args, encoding=encoding, tokenizer=tokenizer, device=args.device)
         # don't use agg here if you need to learn custom weights (i.e. using attn)
         # (otherwise have to re-encode each training step...)
